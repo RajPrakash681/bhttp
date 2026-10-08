@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>bhttp sample site</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>It works, in binary.</h1>
+    <p>This page was served by <code>bserve</code> over bhttp/1: an 8-byte frame
+       header, a ten-name static header table, and one persistent TCP connection.</p>
+    <p><img src="/logo.png" alt="bhttp logo" width="64" height="64"></p>
+    <p>Fetch it with <code>bcurl -v localhost:9000/index.html</code>.</p>
+  </main>
+</body>
+</html>
