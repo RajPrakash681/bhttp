@@ -21,6 +21,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -341,6 +342,47 @@ static int on_frame(const struct client *c, const struct url *u, uint32_t id,
     }
 }
 
+/*
+ * Before reusing the connection: anything the server sent since the last
+ * response can only be unknown frames (skipped) or a GOAWAY, after which no
+ * further REQUEST may be sent (SPEC 4). Returns 0 if the connection is usable.
+ */
+static int check_between_requests(struct client *c, const struct url *next)
+{
+    for (;;) {
+        struct pollfd pfd;
+        struct bh_header h;
+        struct bh_goaway g;
+        int rc;
+
+        pfd.fd = c->fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        if (poll(&pfd, 1, 0) <= 0)
+            return 0;   /* nothing pending */
+        rc = bh_read_frame(c->fd, c->rx, &h, io_now_ms() + TIMEOUT_MS);
+        if (rc == BH_IO_EOF) {
+            fprintf(stderr, "bcurl: %s: server closed the connection\n", next->text);
+            return -1;
+        }
+        if (rc != BH_IO_OK) {
+            fprintf(stderr, "bcurl: %s: %s\n", next->text, read_failure(rc));
+            return -1;
+        }
+        if (c->verbose)
+            bh_dump_frame(stderr, '<', c->rx);
+        if (h.type == BH_GOAWAY) {
+            bh_goaway_parse(c->rx + BH_HEADER_LEN, h.length, &g);
+            fprintf(stderr, "bcurl: %s: server sent GOAWAY (last-id %lu, code 0x%02x); "
+                    "not sending more requests\n", next->text, (unsigned long)g.last_id,
+                    (unsigned)g.code);
+            return -1;
+        }
+        if (bh_type_known(h.type))
+            return protocol_error(next, "unexpected frame between responses");
+    }
+}
+
 /* Fetches one URL on the open connection. Returns 0 with *status set, or -1. */
 static int fetch(struct client *c, const struct url *u, uint32_t id, unsigned *status)
 {
@@ -348,6 +390,8 @@ static int fetch(struct client *c, const struct url *u, uint32_t id, unsigned *s
     int done = 0;
 
     memset(&r, 0, sizeof r);
+    if (id > 1 && check_between_requests(c, u) != 0)
+        return -1;
     if (send_request(c, u, id) != 0)
         return -1;
     while (!done) {

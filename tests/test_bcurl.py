@@ -216,6 +216,21 @@ class TestAgainstFakeServer(unittest.TestCase):
         self.assertEqual((rc, out), (2, b"one"))
         self.assertIn("not fetching the remaining", err)
 
+    def test_no_request_after_goaway(self):
+        seen = []
+        first = lambda rid: reply(200, b"one")(rid) + w.goaway(rid, w.NO_ERROR)
+        with harness.FakeServer(scripted([first, reply(200, b"two")], seen)) as fake:
+            rc, out, err = self.fetch(fake, "/1", "/2")
+        self.assertEqual((rc, out), (2, b"one"))
+        self.assertIn("not sending more requests", err)
+        self.assertEqual([f.type for f in seen], [w.REQUEST])
+
+    def test_unknown_frames_between_responses_are_skipped(self):
+        first = lambda rid: reply(200, b"one")(rid) + w.frame(0x55, 0, 0, b"ping?")
+        with harness.FakeServer(scripted([first, reply(200, b"two")])) as fake:
+            rc, out, _ = self.fetch(fake, "/1", "/2")
+        self.assertEqual((rc, out), (0, b"onetwo"))
+
     def test_connection_refused_exits_2(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
