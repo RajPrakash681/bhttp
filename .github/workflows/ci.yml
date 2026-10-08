@@ -19,7 +19,7 @@ jobs:
           - os: macos-latest
             cc: clang
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build (release, -Werror)
         run: make CC=${{ matrix.cc }}
       - name: Unit and conformance tests (ASan + UBSan)
@@ -29,5 +29,5 @@ jobs:
     name: SPEC.pdf is at most two pages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: python3 tools/pdf_pages.py SPEC.pdf 2
