@@ -1,0 +1,13 @@
+{
+  "name": "bhttp-tools",
+  "private": true,
+  "type": "module",
+  "description": "Renders SPEC.md to SPEC.pdf (A4) with Chromium.",
+  "scripts": {
+    "spec": "node render-spec.mjs"
+  },
+  "dependencies": {
+    "marked": "18.1.0",
+    "playwright": "1.62.1"
+  }
+}
