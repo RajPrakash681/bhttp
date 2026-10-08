@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (release, -Werror)
+        run: make CC=${{ matrix.cc }}
+      - name: Unit and conformance tests (ASan + UBSan)
+        run: make test CC=${{ matrix.cc }}
+
+  spec:
+    name: SPEC.pdf is at most two pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/pdf_pages.py SPEC.pdf 2
