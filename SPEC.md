@@ -19,9 +19,10 @@ or handshake: the client's first bytes are its first frame.
   (its END has arrived). A server MUST answer requests in the order received.
 - The **client closes** when it has no more requests; this is the normal end. It MAY send
   GOAWAY first.
-- The **server closes** (a) after a connection error (§7), or (b) when idle: no complete
-  frame has arrived for T seconds while it waits for one (T is implementation-defined, SHOULD
-  be at least 10; bserve uses 30). Before closing on its own initiative a server SHOULD send
+- The **server closes** (a) after a connection error (§7), or (b) when idle: a frame has
+  not arrived complete within T seconds of the server starting to wait for it (bytes of a
+  partial frame do not extend T; T is implementation-defined, SHOULD be at least 10; bserve
+  uses 30). Before closing on its own initiative a server SHOULD send
   GOAWAY, then SHOULD shut down its sending side and read and discard input for a short time
   (≤ 2 s) before closing, so that the peer receives the GOAWAY rather than a reset.
 - A receiver whose connection ends in the middle of a frame discards the partial frame
@@ -48,7 +49,8 @@ Every frame is an 8-byte header followed by `Length` bytes of payload.
 - **Request ID (32):** which request the frame belongs to. The client numbers its requests
   1, 2, 3, … on each connection (MUST be nonzero, SHOULD increase by one). The server copies
   the ID into every frame of the response and checks only that it is not 0. ID 0 means the
-  connection itself.
+  connection itself: a REQUEST, RESPONSE or DATA with ID 0 sent to a server is a connection
+  error (§7), and a RESPONSE with ID 0 reports one.
 
 **Why these widths.** HTTP/2 uses Length 24, Type 8, Flags 8, 1 reserved bit + Stream ID 31
 (9 bytes). bhttp/1 uses 16 / 8 / 8 / 32 (8 bytes):
@@ -123,17 +125,20 @@ indexed; receivers MUST accept the literal form too. An entry is malformed if it
 11–255, if it runs past the end of the payload, if a literal Name is empty or has a byte
 other than lowercase `a-z 0-9 ! # $ % & ' * + - . ^ _ | ~` and backtick, or if a Value
 contains `0x00`, `0x0a` or `0x0d`. Order is kept and repeated names are allowed, with HTTP
-meaning. Clients SHOULD send `host`; a server MUST NOT require any header. There is no
-dynamic table and no Huffman coding, and the block must fit in its one frame.
+meaning; `date` and `last-modified` use IMF-fixdate (`Thu, 08 Oct 2026 12:08:46 GMT`).
+Clients SHOULD send `host`; a server MUST NOT require any header. There is no dynamic table
+and no Huffman coding, and the block must fit in its one frame.
 
 ## 6. Messages and bodies
 
 A message is a REQUEST or RESPONSE frame and, if that frame lacks END, a body of DATA
-frames with the same ID, the last one carrying END. Each DATA frame carries ≤ 16384 bytes;
+frames with the same ID, the last one carrying END. (A server receives only REQUESTs, so
+only a REQUEST opens a body there.) Each DATA frame carries ≤ 16384 bytes;
 senders SHOULD fill all but the last. An empty DATA frame is allowed (useful only with END).
-If `content-length` (ASCII decimal digits) is sent it MUST equal the body length, except in
-a response to HEAD, which carries the headers a GET would get, sets END on the RESPONSE and
-has no DATA. A server MUST read a request body through its END before it treats any further
+`content-length` is optional. If sent, its value is 1 to 19 ASCII digits (leading zeros
+allowed), every copy of it MUST be identical, and it MUST equal the body length, except
+that every response to HEAD, whatever its status, carries the headers a GET would get,
+sets END on the RESPONSE and has no DATA. A receiver treats a violation as malformed. A server MUST read a request body through its END before it treats any further
 frame as a new request; bserve reads the body first and then responds. A server that fails
 after sending RESPONSE (for example, a read error mid-file) MUST close the connection
 without sending END.
@@ -141,16 +146,18 @@ without sending END.
 ## 7. Errors
 
 **Connection errors** break the framing; the stream cannot be resynchronised. They are a
-Length above 16384 (the frame is not read further) and, while a request body is open, any
-REQUEST, RESPONSE, or DATA for another ID. The server sends RESPONSE **400** with ID 0
+Length above 16384 (the frame is not read further); a REQUEST, RESPONSE or DATA with ID 0;
+and, while a request body is open, any frame other than DATA for that ID, an unknown type,
+or GOAWAY (which simply ends the connection). The server sends RESPONSE **400** with ID 0
 (with, like any response, an optional body under that ID), then GOAWAY (`0x01`), then
 closes as in §2.
 
 **Request errors** leave the framing intact: the next frame starts where expected. The
 server replies RESPONSE **400** with the offending frame's ID and **keeps the connection
-open**. They are a REQUEST with ID 0, a payload under 3 bytes, an unknown method, a Path
-Length of 0 or past the payload, a Path rule violation (§5.1), a malformed header block, a
-RESPONSE frame sent to the server, and a DATA frame with no open request body. A malformed
+open**. They are a REQUEST payload under 4 bytes, an unknown method, a Path Length of 0
+or past the payload, a Path rule violation (§5.1), a malformed header block, a bad
+`content-length` (§6), a RESPONSE frame sent to the server (it opens no body), and a DATA
+frame with no open request body. A malformed
 REQUEST without END still has its body read first (§6).
 
 **Other replies:** **404** not found, outside the root, hidden, or not a regular file;
@@ -161,19 +168,25 @@ short `text/plain` body.
 
 **Clients:** a frame with Length > 16384, a RESPONSE or DATA with a wrong ID (including a
 RESPONSE with ID 0, which reports a connection error), a DATA before the RESPONSE, a second
-RESPONSE, a REQUEST, a malformed payload, a status outside 200–599, a `content-length`
-mismatch, or GOAWAY or EOF before END is a protocol error: close and report failure.
+RESPONSE, a REQUEST, a malformed payload, a status outside 200–599, a bad
+`content-length`, or EOF before END is a protocol error: close and report failure. A
+GOAWAY before END means the request was not processed (its ID is above Last-ID): close;
+it MAY be retried on a new connection.
 
 ## 8. Path mapping
 
 A server serving files from a directory ROOT maps the Path as follows: drop the query;
 if the path ends in `/`, append `index.html`; if any segment starts with `.`, 404; resolve
-ROOT + path with all symbolic links followed, and if the result is not inside ROOT, 404;
+ROOT + path with all symbolic links followed, and if the result is not inside ROOT
+(resolved the same way), 404;
 a directory gets 301 (§7), or 404 if the path already ended in `/`; anything else that is
 not a regular file, 404. Syntax errors are
 400 (§5.1), so `..`, a Path without the leading `/`, and NUL bytes never reach the file
-system. `content-type` SHOULD follow the file extension (`application/octet-stream` if
-unknown).
+system. `content-type` SHOULD follow the file extension; bserve maps `html htm` to
+`text/html`, `css` `text/css`, `js` `text/javascript`, `txt` `text/plain`, `md`
+`text/markdown` (each with `; charset=utf-8`), `json` `application/json`, `png`
+`image/png`, `jpg jpeg` `image/jpeg`, `gif` `image/gif`, `svg` `image/svg+xml`, `ico`
+`image/x-icon`, `pdf` `application/pdf`, and anything else to `application/octet-stream`.
 
 ## 9. Versions
 
@@ -213,7 +226,18 @@ S>C  DATA     id=2 END   "400 Bad Request: ...\n"
 S>C  GOAWAY   id=0       Last-ID 2, NO_ERROR; S closes
 ```
 
-## 11. Conformance checklist
+## 11. Reference client
+
+Informative: the contract of bcurl. `bcurl [-v] URL...`, where URL is
+`[bhttp://]host[:port][path]`. The port defaults to 9000; the host ends at the first `:`,
+`/`, `?` or `#`; a `#fragment` is never sent; an empty path becomes `/` and a path that
+starts with `?` gets a `/` in front; otherwise the path is sent unchanged. All URLs must
+name the same host and port and are fetched in order over one connection, never reopened.
+Exit status: 0 if every response was 2xx or 3xx, 4 if the worst was 4xx, 5 if 5xx, 2 on a
+connection or protocol error (later URLs are not fetched), 1 on a usage error; the worst
+wins, in the order 2, 5, 4, 0.
+
+## 12. Conformance checklist
 
 - [ ] Both: big-endian integers; Length > 16384 is a connection error; unknown types are
   skipped by exactly Length bytes; unknown flag bits ignored; reserved types never sent.
