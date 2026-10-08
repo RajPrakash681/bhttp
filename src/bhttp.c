@@ -270,20 +270,6 @@ int bh_fields_check(const uint8_t *p, size_t len, const char **err)
     return r == 0 ? 0 : -1;
 }
 
-int bh_fields_find(const uint8_t *p, size_t len, const char *name, struct bh_field *out)
-{
-    struct bh_fields it;
-    const char *err = NULL;
-    size_t nlen = strlen(name);
-
-    bh_fields_init(&it, p, len);
-    while (bh_fields_next(&it, out, &err) == 1) {
-        if (out->name_len == nlen && memcmp(out->name, name, nlen) == 0)
-            return 1;
-    }
-    return 0;
-}
-
 int bh_content_length(const uint8_t *fields, size_t len, int *present, uint64_t *value,
                       const char **err)
 {

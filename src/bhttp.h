@@ -95,8 +95,6 @@ void bh_fields_init(struct bh_fields *it, const uint8_t *p, size_t len);
 int bh_fields_next(struct bh_fields *it, struct bh_field *f, const char **err);
 /* 0 if the whole block is well formed, -1 otherwise. */
 int bh_fields_check(const uint8_t *p, size_t len, const char **err);
-/* First field called `name` in a block that passed bh_fields_check. */
-int bh_fields_find(const uint8_t *p, size_t len, const char *name, struct bh_field *out);
 
 /* REQUEST payload (SPEC 5.1). */
 struct bh_request {
