@@ -22,9 +22,9 @@ or handshake: the client's first bytes are its first frame.
 - The **server closes** (a) after a connection error (§7), or (b) when idle: a frame has
   not arrived complete within T seconds of the server starting to wait for it (bytes of a
   partial frame do not extend T; T is implementation-defined, SHOULD be at least 10; bserve
-  uses 30). Before closing on its own initiative a server SHOULD send
-  GOAWAY, then SHOULD shut down its sending side and read and discard input for a short time
-  (≤ 2 s) before closing, so that the peer receives the GOAWAY rather than a reset.
+  uses 30). Before closing on its own initiative a server SHOULD send GOAWAY, then SHOULD
+  shut down its sending side and read and discard input for a short time (≤ 2 s) before
+  closing, so that the peer receives the GOAWAY rather than a reset.
 - A receiver whose connection ends in the middle of a frame discards the partial frame
   and closes. Nothing is sent in reply.
 
@@ -83,11 +83,11 @@ for private experiments. A v1 sender MUST NOT send any of them.
 
 **GOAWAY** says "I will close; send no more requests". Its Request ID is 0 and is ignored
 on receipt. *Last-ID* is, from a server, the ID of the last request it answered completely
-(0 if none); a client sends 0. *Code*: `0x00`
-NO_ERROR (idle timeout, shutdown), `0x01` PROTOCOL_ERROR; any other value is treated as
-`0x01`. Bytes after the first five are ignored; a shorter payload is still a GOAWAY, read as
-Last-ID 0 and Code `0x01`. The receiver MUST NOT send another REQUEST and SHOULD close.
-Requests with an ID above Last-ID were not processed and MAY be retried on a new connection.
+(0 if none); a client sends 0. *Code*: `0x00` NO_ERROR (idle timeout, shutdown), `0x01`
+PROTOCOL_ERROR; any other value is treated as `0x01`. Bytes after the first five are
+ignored; a shorter payload is still a GOAWAY, read as Last-ID 0 and Code `0x01`. The
+receiver MUST NOT send another REQUEST and SHOULD close. Requests with an ID above Last-ID
+were not processed and MAY be retried on a new connection.
 
 ## 5. Payloads
 
@@ -133,15 +133,19 @@ and no Huffman coding, and the block must fit in its one frame.
 
 A message is a REQUEST or RESPONSE frame and, if that frame lacks END, a body of DATA
 frames with the same ID, the last one carrying END. (A server receives only REQUESTs, so
-only a REQUEST opens a body there.) Each DATA frame carries ≤ 16384 bytes;
-senders SHOULD fill all but the last. An empty DATA frame is allowed (useful only with END).
+only a REQUEST opens a body there.) Each DATA frame carries ≤ 16384 bytes; senders SHOULD
+fill all but the last. An empty DATA frame is allowed (useful only with END).
+
 `content-length` is optional. If sent, its value is 1 to 19 ASCII digits (leading zeros
-allowed), every copy of it MUST be identical, and it MUST equal the body length, except
-that every response to HEAD, whatever its status, carries the headers a GET would get,
-sets END on the RESPONSE and has no DATA. A receiver treats a violation as malformed. A server MUST read a request body through its END before it treats any further
-frame as a new request; bserve reads the body first and then responds. A server that fails
-after sending RESPONSE (for example, a read error mid-file) MUST close the connection
-without sending END.
+allowed), every copy of it MUST be identical, and it MUST equal the body length. The one
+exception is HEAD: every response to HEAD, whatever its status, carries the headers a GET
+would get (so `content-length` is the GET body's length), sets END on the RESPONSE and has
+no DATA. A receiver treats a violation as a malformed message.
+
+A server MUST read a request body through its END before it treats any further frame as a
+new request; bserve reads the body first and then responds. A server that fails after
+sending RESPONSE (for example, a read error mid-file) MUST close the connection without
+sending END.
 
 ## 7. Errors
 
@@ -157,14 +161,14 @@ server replies RESPONSE **400** with the offending frame's ID and **keeps the co
 open**. They are a REQUEST payload under 4 bytes, an unknown method, a Path Length of 0
 or past the payload, a Path rule violation (§5.1), a malformed header block, a bad
 `content-length` (§6), a RESPONSE frame sent to the server (it opens no body), and a DATA
-frame with no open request body. A malformed
-REQUEST without END still has its body read first (§6).
+frame with no open request body. A malformed REQUEST without END still has its body read
+first (§6).
 
 **Other replies:** **404** not found, outside the root, hidden, or not a regular file;
 **403** not readable; **301** with `location` = path (without the query) + `/` for a
-directory requested without a trailing `/`; **405** with `allow` for a method the server does not implement
-(bserve: `GET, HEAD`); **500** for a read error before RESPONSE. Error responses MAY carry a
-short `text/plain` body.
+directory requested without a trailing `/`; **405** with `allow` for a method the server
+does not implement (bserve: `GET, HEAD`); **500** for a read error before RESPONSE. Error
+responses MAY carry a short `text/plain` body.
 
 **Clients:** a frame with Length > 16384, a RESPONSE or DATA with a wrong ID (including a
 RESPONSE with ID 0, which reports a connection error), a DATA before the RESPONSE, a second
@@ -178,15 +182,14 @@ it MAY be retried on a new connection.
 A server serving files from a directory ROOT maps the Path as follows: drop the query;
 if the path ends in `/`, append `index.html`; if any segment starts with `.`, 404; resolve
 ROOT + path with all symbolic links followed, and if the result is not inside ROOT
-(resolved the same way), 404;
-a directory gets 301 (§7), or 404 if the path already ended in `/`; anything else that is
-not a regular file, 404. Syntax errors are
-400 (§5.1), so `..`, a Path without the leading `/`, and NUL bytes never reach the file
-system. `content-type` SHOULD follow the file extension; bserve maps `html htm` to
-`text/html`, `css` `text/css`, `js` `text/javascript`, `txt` `text/plain`, `md`
-`text/markdown` (each with `; charset=utf-8`), `json` `application/json`, `png`
-`image/png`, `jpg jpeg` `image/jpeg`, `gif` `image/gif`, `svg` `image/svg+xml`, `ico`
-`image/x-icon`, `pdf` `application/pdf`, and anything else to `application/octet-stream`.
+(resolved the same way), 404; a directory gets 301 (§7), or 404 if the path already ended
+in `/`; anything else that is not a regular file, 404. Syntax errors are 400 (§5.1), so
+`..`, a Path without the leading `/`, and NUL bytes never reach the file system.
+`content-type` SHOULD follow the file extension; bserve maps `html htm` to `text/html`,
+`css` `text/css`, `js` `text/javascript`, `txt` `text/plain`, `md` `text/markdown` (each
+with `; charset=utf-8`), `json` `application/json`, `png` `image/png`, `jpg jpeg`
+`image/jpeg`, `gif` `image/gif`, `svg` `image/svg+xml`, `ico` `image/x-icon`, `pdf`
+`application/pdf`, and anything else to `application/octet-stream`.
 
 ## 9. Versions
 
