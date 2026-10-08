@@ -79,8 +79,9 @@ message). It MUST NOT reply to it or close because of it; only the Length limit 
 Types `0x00` and `0x05`–`0x7f` are reserved for later versions of this spec, `0x80`–`0xff`
 for private experiments. A v1 sender MUST NOT send any of them.
 
-**GOAWAY** says "I will close; send no more requests". *Last-ID* is, from a server, the ID
-of the last request it answered completely (0 if none); a client sends 0. *Code*: `0x00`
+**GOAWAY** says "I will close; send no more requests". Its Request ID is 0 and is ignored
+on receipt. *Last-ID* is, from a server, the ID of the last request it answered completely
+(0 if none); a client sends 0. *Code*: `0x00`
 NO_ERROR (idle timeout, shutdown), `0x01` PROTOCOL_ERROR; any other value is treated as
 `0x01`. Bytes after the first five are ignored; a shorter payload is still a GOAWAY, read as
 Last-ID 0 and Code `0x01`. The receiver MUST NOT send another REQUEST and SHOULD close.
@@ -153,8 +154,8 @@ RESPONSE frame sent to the server, and a DATA frame with no open request body. A
 REQUEST without END still has its body read first (§6).
 
 **Other replies:** **404** not found, outside the root, hidden, or not a regular file;
-**403** not readable; **301** with `location` = path + `/` for a directory requested
-without a trailing `/`; **405** with `allow` for a method the server does not implement
+**403** not readable; **301** with `location` = path (without the query) + `/` for a
+directory requested without a trailing `/`; **405** with `allow` for a method the server does not implement
 (bserve: `GET, HEAD`); **500** for a read error before RESPONSE. Error responses MAY carry a
 short `text/plain` body.
 
@@ -168,7 +169,8 @@ mismatch, or GOAWAY or EOF before END is a protocol error: close and report fail
 A server serving files from a directory ROOT maps the Path as follows: drop the query;
 if the path ends in `/`, append `index.html`; if any segment starts with `.`, 404; resolve
 ROOT + path with all symbolic links followed, and if the result is not inside ROOT, 404;
-a directory gets 301 (§7); anything else that is not a regular file, 404. Syntax errors are
+a directory gets 301 (§7), or 404 if the path already ended in `/`; anything else that is
+not a regular file, 404. Syntax errors are
 400 (§5.1), so `..`, a Path without the leading `/`, and NUL bytes never reach the file
 system. `content-type` SHOULD follow the file extension (`application/octet-stream` if
 unknown).
