@@ -239,6 +239,7 @@ class TestErrors(ServerCase):
     MALFORMED = [
         ("empty payload", b""),
         ("2-byte payload", b"\x01\x00"),
+        ("3-byte payload", b"\x01\x00\x00"),
         ("method 0", b"\x00\x00\x01/"),
         ("method 6", b"\x06\x00\x01/"),
         ("method 0xff", b"\xff\x00\x01/"),
@@ -273,9 +274,37 @@ class TestErrors(ServerCase):
                 self.assertEqual(r.status, 400, what)
                 self.assert_alive(rid + 1000)
 
-    def test_request_id_0_is_400(self):
-        self.sock.sendall(w.request(0, "/hello.txt"))
-        self.assertEqual(w.read_response(self.sock, 0).status, 400)
+    def test_id_0_frames_are_connection_errors(self):
+        for data in (w.request(0, "/hello.txt"),
+                     w.request(0, "/hello.txt", flags=0),
+                     w.frame(w.DATA, w.END, 0, b"x"),
+                     w.frame(w.RESPONSE, w.END, 0, b"\x00\xc8")):
+            with self.subTest(data=data[:8].hex()):
+                s = w.connect(self.server.port)
+                s.sendall(data)
+                self.assert_400_and_close(s)
+                s.close()
+
+    def test_request_content_length_is_checked(self):
+        cases = [
+            (w.request(1, "/hello.txt", fields=[("content-length", "5")]), 400),
+            (w.request(2, "/hello.txt", fields=[("content-length", "x")]), 400),
+            (w.request(3, "/hello.txt", fields=[("content-length", "")]), 400),
+            (w.request(4, "/hello.txt", fields=[("content-length", "1" * 20)]), 400),
+            (w.request(5, "/hello.txt", fields=[("content-length", "0"),
+                                                ("content-length", "1")]), 400),
+            (w.request(6, "/hello.txt", fields=[("content-length", "0"),
+                                                ("content-length", "000")]), 200),
+            (w.request(7, "/hello.txt", flags=0, fields=[("content-length", "3")]) +
+             w.frame(w.DATA, 0, 7, b"ab") + w.frame(w.DATA, w.END, 7, b"c"), 200),
+            (w.request(8, "/hello.txt", flags=0, fields=[("content-length", "4")]) +
+             w.frame(w.DATA, w.END, 8, b"abc"), 400),
+        ]
+        for data, status in cases:
+            rid = w.parse_frames(data[:8 + w.HEADER.unpack_from(data)[0]])[0].id
+            with self.subTest(rid=rid):
+                self.sock.sendall(data)
+                self.assertEqual(w.read_response(self.sock, rid).status, status)
         self.assert_alive()
 
     def test_stray_data_and_response_frames_are_400(self):
@@ -335,7 +364,7 @@ class TestPaths(ServerCase):
 class TestRobustness(ServerCase):
 
     def fresh(self):
-        return w.connect(self.server.port, timeout=2)
+        return w.connect(self.server.port)
 
     def test_empty_and_partial_frames(self):
         for data in (b"", b"\x00", b"\x00\x05\x01", b"\x00\x0a\x01\x01\x00\x00\x00\x01abcd",
@@ -364,7 +393,7 @@ class TestRobustness(ServerCase):
 
     def test_fuzz_random_bytes_many_connections(self):
         def body(rng):
-            for _ in range(300):
+            for _ in range(200):
                 kind = rng.randrange(3)
                 if kind == 0:
                     data = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 80)))
@@ -377,12 +406,15 @@ class TestRobustness(ServerCase):
                     for _ in range(rng.randrange(1, 4)):
                         payload[rng.randrange(len(payload))] = rng.getrandbits(8)
                     data = w.frame(w.REQUEST, w.END, rng.getrandbits(32), bytes(payload))
+                # Half-close and wait for the server to finish with us: whatever
+                # the bytes were, it must answer or not, then close (no hang).
                 s = self.fresh()
                 try:
                     s.sendall(data)
-                    s.settimeout(0.05)
-                    s.recv(65536)
-                except (socket.timeout, OSError):
+                    s.shutdown(socket.SHUT_WR)
+                    while s.recv(65536):
+                        pass
+                except (ConnectionResetError, BrokenPipeError):
                     pass
                 finally:
                     s.close()

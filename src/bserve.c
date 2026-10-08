@@ -514,7 +514,7 @@ static enum next next_frame(struct conn *c, struct bh_header *h, const char **wh
  * SPEC 6: read a request body through its END before anything else. The
  * body itself is discarded: bserve only implements GET and HEAD.
  */
-static enum next drain_body(struct conn *c, uint32_t id, const char **why)
+static enum next drain_body(struct conn *c, uint32_t id, uint64_t *body, const char **why)
 {
     for (;;) {
         struct bh_header h;
@@ -523,6 +523,7 @@ static enum next drain_body(struct conn *c, uint32_t id, const char **why)
         if (nx != KEEP)
             return nx;
         if (h.type == BH_DATA && h.id == id) {
+            *body += h.length;
             if (h.flags & BH_FLAG_END)
                 return KEEP;
         } else if (h.type == BH_GOAWAY) {
@@ -535,25 +536,43 @@ static enum next drain_body(struct conn *c, uint32_t id, const char **why)
     }
 }
 
+/* SPEC 6: a request's content-length, if any, must match the body read. */
+static int check_content_length(const struct bh_request *rq, uint64_t body, const char **err)
+{
+    int present;
+    uint64_t value;
+
+    if (bh_content_length(rq->fields, rq->fields_len, &present, &value, err) != 0)
+        return -1;
+    if (present && value != body) {
+        *err = "content-length does not match the body";
+        return -1;
+    }
+    return 0;
+}
+
+/* A REQUEST with a nonzero ID: read its body, if any, then answer it. */
 static enum next on_request(struct conn *c, const struct bh_header *h, const char **why)
 {
     struct exchange ex = { 0, 0, 0, 0, NULL };
     struct bh_request rq;
     const char *err = NULL;
     size_t n = h->length;
+    uint64_t body = 0;
     int rc;
 
     memcpy(c->req, c->rx + BH_HEADER_LEN, n);
     if (!(h->flags & BH_FLAG_END)) {
-        enum next nx = drain_body(c, h->id, why);
+        enum next nx = drain_body(c, h->id, &body, why);
         if (nx != KEEP)
             return nx;
     }
     c->requests++;
     ex.id = h->id;
 
-    if (h->id == 0 || bh_request_parse(c->req, n, &rq, &err) != 0) {
-        ex.note = h->id == 0 ? "request ID 0" : err;
+    if (bh_request_parse(c->req, n, &rq, &err) != 0 ||
+        check_content_length(&rq, body, &err) != 0) {
+        ex.note = err;
         rc = send_text(c, &ex, 400, ex.note, NULL);
         log_bad_request(c, c->req, n, &ex);
     } else {
@@ -570,8 +589,7 @@ static enum next on_request(struct conn *c, const struct bh_header *h, const cha
         *why = "write error";
         return CLOSE;
     }
-    if (h->id != 0)
-        c->last_done = h->id;
+    c->last_done = h->id;
     return KEEP;
 }
 
@@ -592,6 +610,9 @@ static enum next request_error(struct conn *c, uint32_t id, const char *detail, 
 
 static enum next on_frame(struct conn *c, const struct bh_header *h, const char **why)
 {
+    /* SPEC 3, 7: ID 0 is the connection; no request can be named by it. */
+    if (h->id == 0 && (h->type == BH_REQUEST || h->type == BH_RESPONSE || h->type == BH_DATA))
+        return connection_error(c, "REQUEST, RESPONSE or DATA with Request ID 0", why);
     switch (h->type) {
     case BH_REQUEST:
         return on_request(c, h, why);

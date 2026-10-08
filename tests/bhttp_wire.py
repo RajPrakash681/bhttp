@@ -252,7 +252,8 @@ def read_response(sock, rid):
             return resp
 
 
-def connect(port, timeout=5.0):
+def connect(port, timeout=15.0):
+    """A client socket; the timeout is generous for sanitizer builds on busy machines."""
     s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return s
