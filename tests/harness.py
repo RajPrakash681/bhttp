@@ -51,6 +51,7 @@ def make_site(base):
     os.mkdir(os.path.join(root, "sub"))
     with open(os.path.join(root, "sub", "index.html"), "w") as f:
         f.write("<p>sub index</p>\n")
+    os.mkdir(os.path.join(root, "no-index"))
     with open(os.path.join(root, ".hidden"), "w") as f:
         f.write("hidden\n")
     with open(os.path.join(root, "%2e%2e"), "w") as f:

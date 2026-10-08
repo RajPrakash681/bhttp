@@ -570,7 +570,8 @@ static enum next on_request(struct conn *c, const struct bh_header *h, const cha
         *why = "write error";
         return CLOSE;
     }
-    c->last_done = h->id;
+    if (h->id != 0)
+        c->last_done = h->id;
     return KEEP;
 }
 

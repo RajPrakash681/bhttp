@@ -124,6 +124,9 @@ class TestBasics(ServerCase):
         self.assertEqual(r.status, 301)
         self.assertEqual(r.header("location"), "/sub/")
         self.assertEqual(self.get("/sub/").body, self.file_bytes("sub/index.html"))
+        self.assertEqual(self.get("/sub?x=1").header("location"), "/sub/")
+        self.assertEqual(self.get("/no-index").status, 301)
+        self.assertEqual(self.get("/no-index/").status, 404)   # no listing, no loop
 
     def test_405_for_unimplemented_methods(self):
         for i, method in enumerate((w.POST, w.PUT, w.DELETE)):
@@ -159,6 +162,10 @@ class TestPersistence(ServerCase):
 
     def test_client_goaway_closes(self):
         self.sock.sendall(w.goaway())
+        self.assertIsNone(w.read_frame(self.sock))
+
+    def test_goaway_id_and_extra_bytes_are_ignored(self):
+        self.sock.sendall(w.frame(w.GOAWAY, w.END, 77, b"\x00\x00\x00\x00\x00debug"))
         self.assertIsNone(w.read_frame(self.sock))
 
 
