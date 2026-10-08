@@ -1,0 +1,11 @@
+/bserve
+/bcurl
+/build/
+node_modules/
+/SPEC.html
+__pycache__/
+*.pyc
+*.o
+*.d
+*.dSYM/
+.DS_Store
