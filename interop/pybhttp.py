@@ -4,6 +4,7 @@ Everything here is pure encoding/decoding plus a small blocking frame reader.
 Section numbers in comments refer to SPEC.md.
 """
 
+import select
 import socket
 import struct
 import time
@@ -132,6 +133,13 @@ class FrameReader:
         out = bytes(self._buf[:n])
         del self._buf[:n]
         return out
+
+    def pending(self) -> bool:
+        """True if bytes are already buffered or waiting on the socket."""
+        if self._buf:
+            return True
+        readable, _, _ = select.select([self.sock], [], [], 0)
+        return bool(readable)
 
     def read_any(self, idle: Optional[float] = None) -> Optional[Frame]:
         """Read one frame of any type.  `idle` bounds the wait for the whole frame."""

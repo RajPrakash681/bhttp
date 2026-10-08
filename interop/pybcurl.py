@@ -9,7 +9,8 @@ Exit status:
   0  every URL got a complete response with status 200-399
   1  every URL got a complete response, at least one with status >= 400
   2  usage error (bad option or URL)
-  3  could not connect, or the connection failed at the socket level
+  3  could not connect, the connection failed at the socket level, or the
+     server ended it (GOAWAY or close) before every URL was sent
   4  protocol error (SPEC.md §7 "Clients"); later URLs are not fetched
 """
 
@@ -32,6 +33,10 @@ class UsageError(Exception):
 
 class ProtocolError(Exception):
     pass
+
+
+class ServerGone(Exception):
+    """The server ended the connection between two requests (GOAWAY or EOF)."""
 
 
 class Url(NamedTuple):
@@ -104,6 +109,8 @@ class Client:
     def fetch(self, url: Url) -> int:
         """Send one GET and copy its body to stdout; returns the status."""
         self.connect(url)
+        if self.next_id > 1:
+            self.check_between_requests()
         rid, self.next_id = self.next_id, self.next_id + 1
         headers = [("host", url.authority), ("user-agent", USER_AGENT), ("accept", b"*/*")]
         payload = bh.encode_request(bh.METHOD_CODES["GET"], url.path, headers)
@@ -115,14 +122,31 @@ class Client:
         self.sock.sendall(bh.encode_frame(*frame))
         return self.read_response(rid)
 
-    def next_frame(self) -> Frame:
+    def check_between_requests(self) -> None:
+        """§4: no REQUEST may follow a GOAWAY, so read what arrived since the last END."""
+        assert self.reader is not None
+        while self.reader.pending():
+            frame = self.read_frame(skip_unknown=False)
+            if frame is None:
+                raise ServerGone("server closed the connection")
+            if frame.type == bh.GOAWAY:
+                last_id, code = bh.decode_goaway(frame.payload)
+                raise ServerGone("server sent GOAWAY (last-id %d, code 0x%02x); not sending "
+                                 "more requests" % (last_id, code))
+            if frame.known:
+                raise ProtocolError("unexpected %s between responses" % bh.KNOWN_TYPES[frame.type])
+
+    def read_frame(self, skip_unknown: bool = True) -> Optional[Frame]:
         assert self.reader is not None
         try:
-            frame = self.reader.read()
+            return self.reader.read() if skip_unknown else self.reader.read_any()
         except (bh.FrameTooLarge, bh.TruncatedFrame) as exc:
             raise ProtocolError(str(exc))
         except bh.IdleTimeout:
             raise socket.timeout("no frame from the server for 60 s")
+
+    def next_frame(self) -> Frame:
+        frame = self.read_frame()
         if frame is None:
             raise ProtocolError("connection closed before END")
         return frame
@@ -201,6 +225,9 @@ def main(argv: List[str]) -> int:
     except ProtocolError as exc:
         print("pybcurl: protocol error: %s" % exc, file=sys.stderr)
         return EXIT_PROTOCOL
+    except ServerGone as exc:
+        print("pybcurl: %s" % exc, file=sys.stderr)
+        return EXIT_CONNECT
     except OSError as exc:
         print("pybcurl: connection failed: %s" % exc, file=sys.stderr)
         return EXIT_CONNECT

@@ -59,15 +59,16 @@ def content_type(path: bytes) -> bytes:
 def resolve(root: bytes, path: bytes) -> Tuple[int, bytes]:
     """Map a request Path (already syntax-checked) to (status, fs_path_or_location)."""
     url_path = path.split(b"?", 1)[0]
-    query = path[len(url_path):]
-    fs_rel = url_path + b"index.html" if url_path.endswith(b"/") else url_path
+    trailing_slash = url_path.endswith(b"/")
+    fs_rel = url_path + b"index.html" if trailing_slash else url_path
     if any(seg.startswith(b".") for seg in fs_rel.split(b"/")):
         return 404, b""
     real = os.path.realpath(root + fs_rel)
     if real != root and not real.startswith(root.rstrip(b"/") + b"/"):
         return 404, b""
     if os.path.isdir(real):
-        return 301, url_path + b"/" + query
+        # 301 to the path without its query; 404 if it already ended in '/'.
+        return (404, b"") if trailing_slash else (301, url_path + b"/")
     if not os.path.isfile(real):
         return 404, b""
     if not os.access(real, os.R_OK):
