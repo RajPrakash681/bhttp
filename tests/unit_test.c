@@ -208,6 +208,33 @@ static void test_response_goaway(void)
     CHECK(g.last_id == 0 && g.code == BH_PROTOCOL_ERROR);
 }
 
+static int clen(const uint8_t *block, size_t n, int *present, uint64_t *v)
+{
+    const char *err = NULL;
+    return bh_content_length(block, n, present, v, &err);
+}
+
+static void test_content_length(void)
+{
+    int present = -1;
+    uint64_t v = 99;
+
+    CHECK(clen(NULL, 0, &present, &v) == 0 && present == 0 && v == 0);
+    CHECK(clen(BYTES(0x05, 0x00, 0x02, '1', '4'), 5, &present, &v) == 0 && present && v == 14);
+    CHECK(clen(BYTES(0x05, 0x00, 0x01, '7', 0x05, 0x00, 0x02, '0', '7'), 9, &present, &v) == 0);
+    CHECK(present && v == 7);
+    CHECK(clen(BYTES(0x05, 0x00, 0x01, '7', 0x05, 0x00, 0x01, '8'), 8, &present, &v) != 0);
+    CHECK(clen(BYTES(0x05, 0x00, 0x00), 3, &present, &v) != 0);
+    CHECK(clen(BYTES(0x05, 0x00, 0x02, '1', 'x'), 5, &present, &v) != 0);
+    /* the literal form of the name counts too */
+    {
+        static const uint8_t lit[] = { 0x00, 0x0e, 'c', 'o', 'n', 't', 'e', 'n', 't', '-',
+                                       'l', 'e', 'n', 'g', 't', 'h', 0x00, 0x01, '3',
+                                       0x05, 0x00, 0x01, '4' };
+        CHECK(clen(lit, sizeof lit, &present, &v) != 0);
+    }
+}
+
 static void test_buf_and_decimal(void)
 {
     uint8_t mem[3];
@@ -239,6 +266,7 @@ int main(void)
     test_fields();
     test_request();
     test_response_goaway();
+    test_content_length();
     test_buf_and_decimal();
     printf("unit tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

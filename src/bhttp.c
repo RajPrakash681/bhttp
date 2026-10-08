@@ -284,6 +284,35 @@ int bh_fields_find(const uint8_t *p, size_t len, const char *name, struct bh_fie
     return 0;
 }
 
+int bh_content_length(const uint8_t *fields, size_t len, int *present, uint64_t *value,
+                      const char **err)
+{
+    static const char name[] = "content-length";
+    struct bh_fields it;
+    struct bh_field f;
+    const char *ignored = NULL;
+
+    *present = 0;
+    *value = 0;
+    bh_fields_init(&it, fields, len);
+    while (bh_fields_next(&it, &f, &ignored) == 1) {
+        uint64_t v;
+        if (f.name_len != sizeof name - 1 || memcmp(f.name, name, sizeof name - 1) != 0)
+            continue;
+        if (bh_parse_decimal(f.value, f.value_len, &v) != 0) {
+            *err = "content-length is not 1-19 ASCII digits";
+            return -1;
+        }
+        if (*present && v != *value) {
+            *err = "conflicting content-length values";
+            return -1;
+        }
+        *present = 1;
+        *value = v;
+    }
+    return 0;
+}
+
 /* ---- REQUEST ---------------------------------------------------------- */
 
 const char *bh_method_name(uint8_t method)
@@ -340,8 +369,8 @@ int bh_request_parse(const uint8_t *p, size_t n, struct bh_request *rq, const ch
 {
     size_t plen;
 
-    if (n < 3) {
-        *err = "REQUEST payload shorter than 3 bytes";
+    if (n < 4) {   /* Method, Path Length and at least one path byte */
+        *err = "REQUEST payload shorter than 4 bytes";
         return -1;
     }
     rq->method = p[0];
