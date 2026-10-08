@@ -102,9 +102,12 @@ names bcurl and bserve actually send:
 ### Errors
 
 If a frame header is bad (Length above 16384), the byte stream cannot be resynchronised:
-the server answers 400 with Request ID 0, sends GOAWAY, and closes. If the framing is
-intact but the payload is malformed (bad path, bad header entry, unknown method, and so
-on), the server answers 400 with that request's ID and keeps the connection open.
+the server answers 400 with Request ID 0, sends GOAWAY, and closes. The same happens for a
+REQUEST, RESPONSE or DATA frame that uses ID 0 (which names the connection, so a 400 on ID 0
+always means "connection error") and for a stray frame inside a request body. If the
+framing is intact but the payload is malformed (bad path, bad header entry, unknown method,
+bad `content-length`, and so on), the server answers 400 with that request's ID and keeps
+the connection open.
 
 ## bserve
 
@@ -134,8 +137,10 @@ bserve [-t idle_seconds] ROOT PORT
 bcurl [-v] URL [URL...]       URL = [bhttp://]host[:port][/path], port 9000 by default
 ```
 
-All URLs must name the same host and port. They are fetched in order over **one** TCP
-connection, which is never reopened: if it fails, the remaining URLs are not fetched.
+The host ends at the first `:`, `/`, `?` or `#`; a `#fragment` is never sent, an empty
+path becomes `/`, and `host?q` asks for `/?q`. All URLs must name the same host and port.
+They are fetched in order over **one** TCP connection, which is never reopened: if it
+fails, or the server sends GOAWAY, the remaining URLs are not fetched.
 Bodies go to stdout. `-v` prints each frame sent (`>`) and received (`<`) to stderr: a
 summary line, the decoded header fields, and a hexdump of the whole frame.
 
@@ -162,21 +167,23 @@ protocol written from SPEC.md: `tests/bhttp_wire.py` builds and parses frames it
 never calls the C code. It covers:
 
 - **bserve:** 200 with correct headers and bytes; 404, 301, 403, 405; HEAD; query strings;
-  raw-byte paths; 400 for 25 kinds of malformed payload, each followed by a valid request
-  on the same socket to prove the connection stayed open; 400 + GOAWAY + close for an
-  oversized Length and for HTTP/1 text; unknown frame types skipped before, between and
+  raw-byte paths; 400 for 26 kinds of malformed payload, each followed by a valid request
+  on the same socket to prove the connection stayed open; request `content-length`
+  checked against the body; 400 + GOAWAY + close for an oversized Length, for HTTP/1 text
+  and for frames on ID 0; unknown frame types skipped before, between and
   inside requests; three requests on one connection, checked against the server log;
   pipelined requests; 100 KiB and exactly-32 KiB files as multiple DATA frames that
   reassemble exactly (generated at test time); request bodies read through END; path
   traversal, symlink escapes, FIFOs and dot-files refused; idle timeout with GOAWAY; empty
-  and partial frames; a random-bytes fuzz loop over 300 connections and 500 fuzzed
-  REQUESTs on one connection, after which the server must still answer and its log must be
+  and partial frames; a random-bytes fuzz loop over 200 connections (each half-closed, and
+  the server must then close it too) and 500 fuzzed REQUESTs on one connection, after which the server must still answer and its log must be
   free of sanitizer reports.
 - **bcurl:** body to stdout; exit codes 0, 1, 2, 4, 5; `-v` hexdumps that reassemble to
   exactly the frames the spec prescribes; several URLs over one connection, checked by
   counting `connect` lines in the server log; the request bytes checked by a fake server;
-  unknown frames skipped (a fake server injects them before and inside a response); and
-  13 kinds of misbehaving server, each of which must give exit status 2.
+  unknown frames skipped (a fake server injects them before, inside and between
+  responses); no REQUEST after a GOAWAY; URL forms (`?`, `#`); and 15 kinds of
+  misbehaving server, each of which must give exit status 2.
 
 The fuzz tests take their seed from `FUZZ_SEED` if set, and print it on failure.
 GitHub Actions runs `make` and `make test` on Ubuntu (gcc and clang) and macOS (clang), and
