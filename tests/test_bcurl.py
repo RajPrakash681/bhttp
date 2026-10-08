@@ -146,12 +146,14 @@ class TestAgainstFakeServer(unittest.TestCase):
 
     def test_request_frames_follow_the_spec(self):
         seen = []
-        with harness.FakeServer(scripted([reply(200, b"a"), reply(200, b"b")], seen)) as fake:
-            rc, out, _ = self.fetch(fake, "/x", "/y?q=1")
-        self.assertEqual((rc, out), (0, b"ab"))
+        steps = [reply(200, b"a"), reply(200, b"b"), reply(200, b"c")]
+        with harness.FakeServer(scripted(steps, seen)) as fake:
+            rc, out, _ = self.fetch(fake, "/x", "/y?q=1#frag", "#top")
+        self.assertEqual((rc, out), (0, b"abc"))
         fields = EXPECTED_FIELDS(fake.port)
         self.assertEqual(seen[0], w.parse_frames(w.request(1, "/x", fields=fields))[0])
         self.assertEqual(seen[1], w.parse_frames(w.request(2, "/y?q=1", fields=fields))[0])
+        self.assertEqual(seen[2], w.parse_frames(w.request(3, "/", fields=fields))[0])
         self.assertEqual(w.raw_entry_indices(seen[0].payload[5:]), [1, 2, 3])
 
     def test_unknown_frames_are_skipped(self):

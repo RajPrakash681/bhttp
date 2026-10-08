@@ -94,7 +94,7 @@ static int parse_url(const char *text, struct url *u, const char **err)
         p = close + 1;
     } else {
         host = p;
-        while (*p && *p != ':' && *p != '/')
+        while (*p && *p != ':' && *p != '/' && *p != '#')
             p++;
         hlen = (size_t)(p - host);
     }
@@ -116,12 +116,12 @@ static int parse_url(const char *text, struct url *u, const char **err)
         unsigned long v = 0;
         while (*p >= '0' && *p <= '9' && p - digits < 5)
             v = v * 10u + (unsigned long)(*p++ - '0');
-        if (p == digits || v == 0 || v > 65535 || (*p != '\0' && *p != '/')) {
+        if (p == digits || v == 0 || v > 65535 || (*p != '\0' && *p != '/' && *p != '#')) {
             *err = "invalid port";
             return -1;
         }
         snprintf(u->port, sizeof u->port, "%lu", v);
-    } else if (*p != '\0' && *p != '/') {
+    } else if (*p != '\0' && *p != '/' && *p != '#') {
         *err = "unexpected character after host";
         return -1;
     } else {
@@ -132,12 +132,12 @@ static int parse_url(const char *text, struct url *u, const char **err)
     snprintf(u->authority, sizeof u->authority, bracketed ? "[%s]:%s" : "%s:%s", u->host,
              u->port);
 
-    if (*p == '\0') {
+    /* the path runs to the end, minus any #fragment, which is never sent */
+    u->path = p;
+    u->path_len = strcspn(p, "#");
+    if (u->path_len == 0) {
         u->path = "/";
         u->path_len = 1;
-    } else {
-        u->path = p;
-        u->path_len = strlen(p);
     }
     return 0;
 }
