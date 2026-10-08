@@ -3,6 +3,7 @@ import os
 import random
 import socket
 import struct
+import sys
 import time
 import unittest
 
@@ -345,52 +346,60 @@ class TestRobustness(ServerCase):
         self.assertIsNone(w.read_frame(s))
         s.close()
 
-    def test_fuzz_random_bytes_many_connections(self):
+    def with_seed(self, body):
+        """Runs body(rng); on any failure, reports the seed that reproduces it."""
         seed = int(os.environ.get("FUZZ_SEED", time.time()))
-        rng = random.Random(seed)
-        for i in range(300):
-            kind = rng.randrange(3)
-            if kind == 0:
-                data = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 80)))
-            elif kind == 1:
-                payload = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 60)))
-                data = w.frame(rng.choice((1, 2, 3, 4, rng.randrange(256))),
-                               rng.getrandbits(8), rng.getrandbits(32), payload)
-            else:
-                payload = bytearray(w.request_payload(w.GET, "/hello.txt", w.DEFAULT_FIELDS))
-                for _ in range(rng.randrange(1, 4)):
-                    payload[rng.randrange(len(payload))] = rng.getrandbits(8)
-                data = w.frame(w.REQUEST, w.END, rng.getrandbits(32), bytes(payload))
-            s = self.fresh()
-            try:
-                s.sendall(data)
-                s.settimeout(0.05)
+        try:
+            body(random.Random(seed))
+        except BaseException:
+            sys.stderr.write("\nreproduce with FUZZ_SEED=%d\n" % seed)
+            raise
+
+    def test_fuzz_random_bytes_many_connections(self):
+        def body(rng):
+            for _ in range(300):
+                kind = rng.randrange(3)
+                if kind == 0:
+                    data = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 80)))
+                elif kind == 1:
+                    payload = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 60)))
+                    data = w.frame(rng.choice((1, 2, 3, 4, rng.randrange(256))),
+                                   rng.getrandbits(8), rng.getrandbits(32), payload)
+                else:
+                    payload = bytearray(w.request_payload(w.GET, "/hello.txt", w.DEFAULT_FIELDS))
+                    for _ in range(rng.randrange(1, 4)):
+                        payload[rng.randrange(len(payload))] = rng.getrandbits(8)
+                    data = w.frame(w.REQUEST, w.END, rng.getrandbits(32), bytes(payload))
+                s = self.fresh()
                 try:
+                    s.sendall(data)
+                    s.settimeout(0.05)
                     s.recv(65536)
-                except (socket.timeout, ConnectionResetError):
+                except (socket.timeout, OSError):
                     pass
-            finally:
-                s.close()
-        self.assert_alive()
-        self.assertEqual(harness.sanitizer_lines(self.server.log()), [], "seed %d" % seed)
+                finally:
+                    s.close()
+            self.assert_alive()
+            self.assertEqual(harness.sanitizer_lines(self.server.log()), [])
+        self.with_seed(body)
 
     def test_fuzz_request_payloads_one_connection(self):
         """Any REQUEST whose framing is intact gets exactly one response with its ID."""
-        seed = int(os.environ.get("FUZZ_SEED", time.time()))
-        rng = random.Random(seed)
-        base = w.request_payload(w.GET, "/hello.txt", w.DEFAULT_FIELDS)
-        for rid in range(1, 501):
-            if rng.random() < 0.5:
-                payload = bytearray(base)
-                for _ in range(rng.randrange(1, 5)):
-                    payload[rng.randrange(len(payload))] = rng.getrandbits(8)
-                payload = bytes(payload[:rng.randrange(len(payload) + 1)])
-            else:
-                payload = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 40)))
-            self.sock.sendall(w.frame(w.REQUEST, w.END, rid, payload))
-            r = w.read_response(self.sock, rid)
-            self.assertIn(r.status, (200, 301, 400, 404, 405), "seed %d rid %d" % (seed, rid))
-        self.assert_alive(1000)
+        def body(rng):
+            base = w.request_payload(w.GET, "/hello.txt", w.DEFAULT_FIELDS)
+            for rid in range(1, 501):
+                if rng.random() < 0.5:
+                    payload = bytearray(base)
+                    for _ in range(rng.randrange(1, 5)):
+                        payload[rng.randrange(len(payload))] = rng.getrandbits(8)
+                    payload = bytes(payload[:rng.randrange(len(payload) + 1)])
+                else:
+                    payload = bytes(rng.getrandbits(8) for _ in range(rng.randrange(0, 40)))
+                self.sock.sendall(w.frame(w.REQUEST, w.END, rid, payload))
+                r = w.read_response(self.sock, rid)
+                self.assertIn(r.status, (200, 301, 400, 404, 405), "rid %d" % rid)
+            self.assert_alive(1000)
+        self.with_seed(body)
 
 
 class TestIdleTimeout(harness.SiteServerCase, unittest.TestCase):
