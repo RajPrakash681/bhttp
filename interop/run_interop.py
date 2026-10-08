@@ -173,6 +173,7 @@ def make_tree() -> Tree:
     base = tempfile.mkdtemp(prefix="bhttp-interop-")
     root = os.path.join(base, "root")
     os.makedirs(os.path.join(root, "sub"))
+    os.makedirs(os.path.join(root, "idxdir", "index.html"))  # index.html that is a directory
     os.makedirs(os.path.join(base, "outside"))
     rnd = random.Random(1)
     files = {
@@ -812,6 +813,14 @@ def s_client_goaway(raw: Raw, tree: Tree) -> None:
     raw.expect_eof(5.0)
 
 
+def s_client_goaway_id(raw: Raw, tree: Tree) -> None:
+    """§4: a GOAWAY's Request ID is ignored on receipt."""
+    raw.get(1, b"/small.txt")
+    raw.expect(1, 200)
+    raw.send(GOAWAY, 0, 7, bh.encode_goaway(0, 0))
+    raw.expect_eof(5.0)
+
+
 SERVER_TESTS = [
     ("HTTP/1.1 text -> conn error", srv_case(s_http1_text)),
     ("Length 16385 -> 400/0, GOAWAY", srv_case(s_too_long)),
@@ -847,6 +856,8 @@ SERVER_TESTS = [
     ("POST + body -> 405, allow", srv_case(s_405)),
     ("/sub -> 301 location /sub/", srv_case(path_status(b"/sub", 301, location=b"/sub/"))),
     ("/sub/ -> index.html", srv_case(path_status(b"/sub/", 200, "/sub/index.html"))),
+    ("301 location drops query", srv_case(path_status(b"/sub?x=1", 301, location=b"/sub/"))),
+    ("dir/ whose index is a dir: 404", srv_case(path_status(b"/idxdir/", 404))),
     ("query dropped", srv_case(path_status(b"/small.txt?a=1&b=/..", 200, "/small.txt"))),
     ("%2e%2e is a literal name", srv_case(path_status(b"/%2e%2e", 200, "/%2e%2e"))),
     ("/.hidden -> 404", srv_case(path_status(b"/.hidden", 404))),
@@ -860,6 +871,7 @@ SERVER_TESTS = [
     ("empty file", srv_case(path_status(b"/empty.txt", 200, "/empty.txt"))),
     ("truncated frame -> close", srv_case(s_truncated)),
     ("client GOAWAY -> close", srv_case(s_client_goaway)),
+    ("GOAWAY ID 7 ignored -> close", srv_case(s_client_goaway_id)),
 ]
 SLOW_SERVER_TESTS = [("idle close with GOAWAY 0x00", srv_case(s_idle))]
 
@@ -878,6 +890,7 @@ class ScriptedServer:
         self.script = script
         self.requests: List[Frame] = []
         self.connections = 0
+        self.threads: List[threading.Thread] = []
         self.lsock = socket.socket()
         self.lsock.bind((HOST, 0))
         self.lsock.listen(4)
@@ -885,7 +898,10 @@ class ScriptedServer:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def close(self) -> None:
+        """Stop accepting, then let every connection finish reading what the client sent."""
         self.lsock.close()
+        for t in list(self.threads):
+            t.join(5)
 
     def _loop(self) -> None:
         while True:
@@ -894,7 +910,9 @@ class ScriptedServer:
             except OSError:
                 return
             self.connections += 1
-            threading.Thread(target=self._conn, args=(sock,), daemon=True).start()
+            t = threading.Thread(target=self._conn, args=(sock,), daemon=True)
+            self.threads.append(t)
+            t.start()
 
     def _conn(self, sock: socket.socket) -> None:
         reader = bh.FrameReader(sock)
@@ -1050,6 +1068,21 @@ def c_goaway_after_end(sock, reader, req):
     sock.shutdown(socket.SHUT_WR)
 
 
+def c_goaway_pending(sock, reader, req):
+    """Response 1 and a GOAWAY(Last-ID 1) in one segment: request 2 must not be sent (§4)."""
+    send(sock, ok_response(req.rid, BODY), raw_frame(0x7E, 0, 0, b"skip me"),
+         raw_frame(GOAWAY, 0, 0, bh.encode_goaway(req.rid, 0)))
+    time.sleep(0.3)
+
+
+def expect_no_second_request(r: ClientRun, s: ScriptedServer) -> None:
+    check(r.code is not None, "client hung")
+    check([f.rid for f in s.requests] == [1], "requests sent: IDs %s, want only 1"
+          % [f.rid for f in s.requests])
+    check(r.out == BODY, "stdout %r, want the first body" % short(r.out))
+    check(r.code != 0, "exit 0 although the second URL was never fetched")
+
+
 def expect_body(want: bytes) -> Callable[[ClientRun, ScriptedServer], None]:
     def fn(r: ClientRun, s: ScriptedServer) -> None:
         expect_success(r, want)
@@ -1084,6 +1117,7 @@ CLIENT_TESTS = [
     ("1-3 byte TCP segments", scripted(c_fragmented, None, expect_body(BODY * 50))),
     ("uneven + empty DATA frames", scripted(c_uneven_data, None, expect_body(BODY))),
     ("GOAWAY after END is fine", scripted(c_goaway_after_end, None, expect_body(BODY))),
+    ("pending GOAWAY: no 2nd REQUEST", scripted(c_goaway_pending, ["/a", "/b"], expect_no_second_request)),
     ("wrong RESPONSE ID", scripted(c_wrong_id)),
     ("DATA before RESPONSE", scripted(c_data_first)),
     ("RESPONSE on ID 0", scripted(c_id0)),
@@ -1216,7 +1250,6 @@ def c_status_only(code: int) -> Script:
 OBS_SERVER = [
     ("REQUEST c-l 5, no body", obs_server_status(b"/small.txt", [("content-length", b"5")])),
     ("REQUEST c-l 'x'", obs_server_status(b"/small.txt", [("content-length", b"x")])),
-    ("301 location for /sub?x=1", obs_server_status(b"/sub?x=1", [], show="location")),
 ]
 OBS_CLIENT = [
     ("exit code for a 404", obs_client(c_status_only(404), "/x")),
@@ -1246,7 +1279,7 @@ def print_observations(rows: List[Tuple[str, Dict[str, str]]], columns: List[str
     if not rows:
         return
     width = max(len(t) for t, _ in rows) + 2
-    colw = max([len(v) for _, vals in rows for v in vals.values()] + [6]) + 2
+    colw = max([len(v) for _, vals in rows for v in vals.values()] + [len(c) for c in columns]) + 2
     print("%-*s%s" % (width, "probe", "".join("%-*s" % (colw, c) for c in columns)))
     for test, vals in rows:
         print("%-*s%s" % (width, test, "".join("%-*s" % (colw, vals.get(c, "-")) for c in columns)))
