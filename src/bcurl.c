@@ -49,6 +49,7 @@ struct url {
     char authority[272];       /* host header: as written, plus :port */
     const char *path;          /* points into text, or "/" */
     size_t path_len;
+    size_t slash;              /* 1: send a '/' before path ("host?q") */
 };
 
 struct client {
@@ -63,6 +64,12 @@ struct client {
 static int host_byte_ok(unsigned char c)
 {
     return c > 0x20 && c < 0x7f && c != '/' && c != '?' && c != '#' && c != '@';
+}
+
+/* The host[:port] part ends at the end of the URL or at one of "/?#". */
+static int ends_authority(char c)
+{
+    return c == '\0' || c == '/' || c == '?' || c == '#';
 }
 
 static int parse_url(const char *text, struct url *u, const char **err)
@@ -95,7 +102,7 @@ static int parse_url(const char *text, struct url *u, const char **err)
         p = close + 1;
     } else {
         host = p;
-        while (*p && *p != ':' && *p != '/' && *p != '#')
+        while (*p && *p != ':' && *p != '/' && *p != '?' && *p != '#')
             p++;
         hlen = (size_t)(p - host);
     }
@@ -117,12 +124,12 @@ static int parse_url(const char *text, struct url *u, const char **err)
         unsigned long v = 0;
         while (*p >= '0' && *p <= '9' && p - digits < 5)
             v = v * 10u + (unsigned long)(*p++ - '0');
-        if (p == digits || v == 0 || v > 65535 || (*p != '\0' && *p != '/' && *p != '#')) {
+        if (p == digits || v == 0 || v > 65535 || !ends_authority(*p)) {
             *err = "invalid port";
             return -1;
         }
         snprintf(u->port, sizeof u->port, "%lu", v);
-    } else if (*p != '\0' && *p != '/' && *p != '#') {
+    } else if (!ends_authority(*p)) {
         *err = "unexpected character after host";
         return -1;
     } else {
@@ -133,12 +140,21 @@ static int parse_url(const char *text, struct url *u, const char **err)
     snprintf(u->authority, sizeof u->authority, bracketed ? "[%s]:%s" : "%s:%s", u->host,
              u->port);
 
-    /* the path runs to the end, minus any #fragment, which is never sent */
+    /*
+     * SPEC 11: the path runs to the end, minus any #fragment, which is never
+     * sent. An empty path is "/", and "?q" is sent as "/?q".
+     */
     u->path = p;
     u->path_len = strcspn(p, "#");
     if (u->path_len == 0) {
         u->path = "/";
         u->path_len = 1;
+    } else if (*p == '?') {
+        u->slash = 1;
+    }
+    if (u->slash + u->path_len > 0xffffu) {
+        *err = "path too long";
+        return -1;
     }
     return 0;
 }
@@ -225,12 +241,9 @@ static int send_request(struct client *c, const struct url *u, uint32_t id)
 
     bh_buf_init(&b, c->tx + BH_HEADER_LEN, BH_MAX_PAYLOAD);
     bh_put_u8(&b, BH_GET);
-    if (u->path_len > 0xffffu) {
-        b.error = 1;
-    } else {
-        bh_put_u16(&b, (uint16_t)u->path_len);
-        bh_put_bytes(&b, u->path, u->path_len);
-    }
+    bh_put_u16(&b, (uint16_t)(u->slash + u->path_len));   /* parse_url checked the sum */
+    bh_put_bytes(&b, "/", u->slash);
+    bh_put_bytes(&b, u->path, u->path_len);
     bh_put_field(&b, "host", u->authority);
     bh_put_field(&b, "user-agent", CLIENT_NAME);
     bh_put_field(&b, "accept", "*/*");
@@ -282,7 +295,6 @@ static int on_response(const struct client *c, const struct url *u, uint32_t id,
                        const struct bh_header *h, struct reply *r)
 {
     struct bh_response rs;
-    struct bh_field f;
     const char *err = NULL;
 
     if (r->have_response)
@@ -293,11 +305,9 @@ static int on_response(const struct client *c, const struct url *u, uint32_t id,
         return protocol_error(u, "RESPONSE for another request ID");
     if (bh_response_parse(c->rx + BH_HEADER_LEN, h->length, &rs, &err) != 0)
         return protocol_error(u, err);
-    if (bh_fields_find(rs.fields, rs.fields_len, "content-length", &f)) {
-        if (bh_parse_decimal(f.value, f.value_len, &r->content_length) != 0)
-            return protocol_error(u, "malformed content-length");
-        r->have_length = 1;
-    }
+    if (bh_content_length(rs.fields, rs.fields_len, &r->have_length, &r->content_length,
+                          &err) != 0)
+        return protocol_error(u, err);
     r->have_response = 1;
     r->status = rs.status;
     return (h->flags & BH_FLAG_END) ? 1 : 0;
@@ -333,7 +343,8 @@ static int on_frame(const struct client *c, const struct url *u, uint32_t id,
     case BH_GOAWAY:
         bh_goaway_parse(c->rx + BH_HEADER_LEN, h->length, &g);
         fprintf(stderr, "bcurl: %s: server sent GOAWAY (last-id %lu, code 0x%02x) before the "
-                "response was complete\n", u->text, (unsigned long)g.last_id, (unsigned)g.code);
+                "response was complete; the request was not processed\n", u->text,
+                (unsigned long)g.last_id, (unsigned)g.code);
         return -1;
     case BH_REQUEST:
         return protocol_error(u, "server sent a REQUEST");

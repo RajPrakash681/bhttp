@@ -156,6 +156,22 @@ class TestAgainstFakeServer(unittest.TestCase):
         self.assertEqual(seen[2], w.parse_frames(w.request(3, "/", fields=fields))[0])
         self.assertEqual(w.raw_entry_indices(seen[0].payload[5:]), [1, 2, 3])
 
+    def test_url_forms(self):
+        seen = []
+        steps = [reply(200, b"a"), reply(200, b"b"), reply(200, b"c")]
+        with harness.FakeServer(scripted(steps, seen)) as fake:
+            rc, out, _ = harness.run_bcurl("127.0.0.1:%d?x=1" % fake.port,
+                                           "bhttp://127.0.0.1:%d#frag" % fake.port,
+                                           "127.0.0.1:%d/a?b#c" % fake.port)
+        self.assertEqual((rc, out), (0, b"abc"))
+        paths = [w.parse_request(f.payload)[1] for f in seen]
+        self.assertEqual(paths, [b"/?x=1", b"/", b"/a?b"])
+
+    def test_identical_content_length_copies_are_fine(self):
+        step = reply(200, b"ok", fields=[("content-length", "02")])
+        with harness.FakeServer(scripted([step])) as fake:
+            self.assertEqual(self.fetch(fake, "/"), (0, b"ok", ""))
+
     def test_unknown_frames_are_skipped(self):
         def step(rid):
             return (w.frame(0x42, 0, 0, b"hello from v2") +
@@ -197,6 +213,11 @@ class TestAgainstFakeServer(unittest.TestCase):
         ("status 600", lambda rid: w.frame(w.RESPONSE, w.END, rid, b"\x02\x58")),
         ("bad header index", lambda rid: w.frame(w.RESPONSE, w.END, rid, b"\x00\xc8\x0b\x00\x00")),
         ("second RESPONSE", lambda rid: w.frame(w.RESPONSE, 0, rid, b"\x00\xc8") * 2),
+        ("conflicting content-length", lambda rid: w.frame(w.RESPONSE, 0, rid, b"\x00\xc8" +
+            w.header_block([("content-length", "2"), ("content-length", "3")])) +
+            w.frame(w.DATA, w.END, rid, b"ab")),
+        ("content-length not digits", lambda rid: w.frame(w.RESPONSE, w.END, rid, b"\x00\xc8" +
+            w.header_block([("content-length", "+0")]))),
         ("server sends REQUEST", lambda rid: w.request(rid, "/")),
     ]
 
