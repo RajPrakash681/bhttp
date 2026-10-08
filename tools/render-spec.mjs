@@ -20,7 +20,7 @@ const css = `
 @page { size: A4; margin: 10mm 11mm 10mm 11mm; }
 * { box-sizing: border-box; }
 html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-body { margin: 0; font: 7.9pt/1.3 "Helvetica Neue", Helvetica, Arial, sans-serif;
+body { margin: 0; font: 8.1pt/1.32 "Helvetica Neue", Helvetica, Arial, sans-serif;
        color: #111; background: #fff; }
 .cols { column-count: 2; column-gap: 6mm; column-fill: auto; }
 h1 { font-size: 13pt; margin: 0 0 1mm; column-span: all; }

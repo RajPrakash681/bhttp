@@ -198,6 +198,21 @@ GET `/` with no headers, ID 1, and a 404 answer with no body:
 Header entries: `01 00 0e` + `localhost:9000` is `host: localhost:9000`, and
 `00 03 78 2d 61 00 01 31` is the literal `x-a: 1`. HEXDUMP.md annotates a full exchange.
 
+One connection, frame by frame (C = client, S = server):
+
+```
+C>S  REQUEST  id=1 END   GET /a.bin
+S>C  RESPONSE id=1       200, content-length: 20000
+S>C  DATA     id=1       16384 bytes
+S>C  DATA     id=1 END   3616 bytes
+C>S  type 0x42 id=0      unknown: skipped, no reply
+C>S  REQUEST  id=2 END   GET /x/../y  (dot segment)
+S>C  RESPONSE id=2       400  (request error: kept open)
+S>C  DATA     id=2 END   "400 Bad Request: ...\n"
+       ... 30 s with no frame from the client ...
+S>C  GOAWAY   id=0       Last-ID 2, NO_ERROR; S closes
+```
+
 ## 11. Conformance checklist
 
 - [ ] Both: big-endian integers; Length > 16384 is a connection error; unknown types are
