@@ -19,7 +19,7 @@ settled.
 - **After the first cross-test.** That run passed every check it had. Then the C sources
   were read, to find where the two sides differed.
 - **Each spec revision.** The spec was revised several times in answer to the questions
-  below (`3290045`, `2867662`, `6fdab1a`, `633e106`, `2f6c21e`). Each time, the Python pair
+  below (`3290045`, `2867662`, `6fdab1a`, `633e106`, `2f6c21e`, `cd6f0d2`, `b059295`). Each time, the Python pair
   was changed to the new text, and the new rules were added to the matrix as graded rows.
 
 This describes the process; nothing in the repository can prove it. What the matrix does
@@ -31,8 +31,8 @@ against the rules in the spec.
 | File | What it is |
 |---|---|
 | `pybhttp.py` | Frame and payload codec: 8-byte header, the four frame types, header block with the 10-name static table and literal form, the `content-length` rules of §6, GOAWAY with its three codes, a frame reader that skips unknown types by exactly Length bytes (sharing one deadline across them), one-line frame dumps for `-v`. |
-| `pybserve.py` | `pybserve [--idle T] [-c MAX] ROOT PORT`: file server. Path mapping and the content-type table (§8), 200/301/400/403/404/405/500, keep-alive, request bodies read through END, request errors (400, connection kept) vs connection errors (400 on ID 0, GOAWAY 0x01, close), the §2 idle rule (only a complete REQUEST, or a DATA frame of an open body, resets T), and at most MAX connections at once: the rest get GOAWAY BUSY. |
-| `pybcurl.py` | `pybcurl [-v] URL...`: client following §11: one origin, one connection (never reopened), IDs 1, 2, 3, ..., bodies to stdout, every §7 "Clients" check, no new REQUEST after a GOAWAY that has already arrived, exit 0/4/5/2/1 with the worst winning. |
+| `pybserve.py` | `pybserve [--idle T] [-c MAX] ROOT PORT`: file server. Path mapping (§8) with bserve's content-type table (top-level README), 200/301/400/403/404/405/500, keep-alive, request bodies read through END, request errors (400, connection kept) vs connection errors (400 on ID 0, GOAWAY 0x01, close), the §2 idle rule (only a complete REQUEST, or a DATA frame of an open body, resets T), and at most MAX connections at once: the rest get GOAWAY BUSY. |
+| `pybcurl.py` | `pybcurl [-v] [-t seconds] URL...`: client following §11: one origin, one connection (never reopened), IDs 1, 2, 3, ..., bodies to stdout and never past `content-length`, every §7 "Clients" check, no new REQUEST after a GOAWAY that has already arrived, `-t` (default 30) counting only RESPONSE and DATA frames as progress, exit 0/4/5/2/1 with the worst winning. |
 | `run_interop.py` | The matrix. Builds the C programs with `make`, generates the test files (including a 21-frame random file) in a temp dir, uses free ports, kills every server it starts. `make interop` runs it, and CI runs that. |
 
 Everything is Python 3.9+ standard library only.
@@ -40,8 +40,8 @@ Everything is Python 3.9+ standard library only.
 ## Running it
 
 ```sh
-python3 interop/run_interop.py           # full matrix, about 45 s
-python3 interop/run_interop.py --slow    # also the 30 s default idle timeout (about 105 s)
+python3 interop/run_interop.py           # full matrix, about 60 s
+python3 interop/run_interop.py --slow    # also the 30 s default idle timeout (about 120 s)
 python3 interop/run_interop.py --only Py # one implementation against itself
 python3 interop/run_interop.py --keep    # keep the temp tree and the server logs
 make interop                             # same as the first line, after building
@@ -93,7 +93,8 @@ python3 interop/pybcurl.py -v localhost:9000/hello.txt localhost:9000/style.css
    - Frame handling: unknown frames before a request and inside a request body; IDs
      0xffffffff, 5, 3 copied back.
    - HEAD gets END and no DATA, for 200, 404, 301, and a 400 to a malformed HEAD.
-   - `date` and `last-modified` are IMF-fixdate, and `content-type` follows the §8 table.
+   - `date` and `last-modified` are IMF-fixdate, and `content-type` follows the file
+     extension (bserve's table, which pybserve shares, is in the top-level README).
    - POST with a body gets 405 plus `allow`.
    - Path mapping: 301 without the query; `index.html`, and 404 when it is a directory;
      `%2e%2e` is a literal name; hidden files, symlinks out of the root, a FIFO and an
@@ -101,8 +102,8 @@ python3 interop/pybcurl.py -v localhost:9000/hello.txt localhost:9000/style.css
    - Connection lifecycle:
      - a truncated frame; client GOAWAY, also with a nonzero ID;
      - the §2 idle rule, on a server started with T = 2-3 s: a partial frame trickled in
-       and unknown frames every 0.4 s do **not** extend T, while four REQUESTs 1.3 s apart
-       and a request body trickled over 3.9 s **do** (each idle GOAWAY carries the right
+       and unknown frames every 0.4 s do **not** extend T, while four REQUESTs 1 s apart
+       and a request body trickled over 3 s **do** (each idle GOAWAY carries the right
        Last-ID);
      - with `--slow`, the default T;
    - **BUSY**: with `-c 2` and two connections held, a third gets GOAWAY Last-ID 0, code
@@ -120,10 +121,15 @@ python3 interop/pybcurl.py -v localhost:9000/hello.txt localhost:9000/style.css
    - The §11 contract:
      - exit codes 0/4/5/2, with the worst winning, including "2 beats 4";
      - a connection the server closed is never reopened;
-     - the URL grammar (fragment never sent, `host:port?q` becomes `/?q`, an empty path
-       becomes `/`, the path is otherwise unchanged);
+     - bcurl's URL grammar, documented in the top-level README (fragment never sent,
+       `host:port?q` becomes `/?q`, an empty path becomes `/`, the path is otherwise
+       unchanged);
      - usage errors exit 1 without connecting: two origins, `http://`, a bad port, an
-       unknown option, no URL, and a URL whose REQUEST would not fit in one frame.
+       unknown option, no URL, a URL whose REQUEST would not fit in one frame, and
+       `-t 0` or `-t x`;
+     - `-t 2`: a silent server, and one that sends only unknown frames, both end in exit
+       2 after about 2 s, while a DATA frame every second keeps a 4-second response
+       alive.
 
 The harness was itself checked against deliberately broken or outdated copies of the
 Python code:
@@ -138,7 +144,7 @@ Each one turned the expected rows red.
 
 ## Results
 
-Final run (macOS, Apple Silicon, Python 3.9.6, against main at `b9029b8`):
+Final run (macOS, Apple Silicon, Python 3.9.6, against main at `b48b79a`): **308 checks without `--slow`, 310 with it, all passing.** CI runs the 308 on every push (`make interop`, Ubuntu with gcc and clang, and macOS).
 
 ```text
 $ python3 interop/run_interop.py --slow
@@ -223,7 +229,7 @@ HEAD 301: END, no DATA           PASS    PASS
 HEAD bad path: 400, no DATA      PASS    PASS
 HEAD bad c-l: 400, no DATA       PASS    PASS
 date, last-modified IMF-fixdate  PASS    PASS
-content-type per §8 table        PASS    PASS
+content-type by extension        PASS    PASS
 POST + body -> 405, allow        PASS    PASS
 /sub -> 301 location /sub/       PASS    PASS
 /sub/ -> index.html              PASS    PASS
@@ -252,54 +258,59 @@ idle close with GOAWAY 0x00      PASS    PASS
 
 3. Client conformance (scripted server)
 ---------------------------------------
-test                            C       Py
-IDs 1,2,3, one conn, host       PASS    PASS
-unknown frames + flag bits      PASS    PASS
-1-3 byte TCP segments           PASS    PASS
-uneven + empty DATA frames      PASS    PASS
-GOAWAY after END is fine        PASS    PASS
-pending GOAWAY: no 2nd REQUEST  PASS    PASS
-wrong RESPONSE ID               PASS    PASS
-DATA before RESPONSE            PASS    PASS
-RESPONSE on ID 0                PASS    PASS
-status 199                      PASS    PASS
-status 600                      PASS    PASS
-content-length mismatch         PASS    PASS
-content-length not digits       PASS    PASS
-EOF before END                  PASS    PASS
-EOF inside a frame              PASS    PASS
-GOAWAY before END -> 2          PASS    PASS
-Length 16385                    PASS    PASS
-second RESPONSE                 PASS    PASS
-REQUEST from server             PASS    PASS
-malformed header block          PASS    PASS
-c-l copies 2,3 -> 2             PASS    PASS
-c-l 20 digits -> 2              PASS    PASS
-c-l empty -> 2                  PASS    PASS
-c-l 007 = 7 bytes -> 0          PASS    PASS
-c-l 2,2 = 2 bytes -> 0          PASS    PASS
-c-l copies 2,02 -> 2            PASS    PASS
-GOAWAY BUSY -> 2, no output     PASS    PASS
-§11 exit: 301 -> 0              PASS    PASS
-§11 exit: 500 -> 5              PASS    PASS
-§11 exit: 200,404 -> 4          PASS    PASS
-§11 exit: 404,500 -> 5          PASS    PASS
-§11 exit: 500,404 -> 5          PASS    PASS
-§11 exit: 2 beats 4 (404, bad)  PASS    PASS
-§11: closed, never reopened     PASS    PASS
-§11 URL: #fragment not sent     PASS    PASS
-§11 URL: host:port?q -> /?q     PASS    PASS
-§11 URL: host:port -> /         PASS    PASS
-§11 URL: host:port#f -> /       PASS    PASS
-§11 URL: path sent unchanged    PASS    PASS
-§11 usage: two origins -> 1     PASS    PASS
-§11 usage: http:// -> 1         PASS    PASS
-§11 usage: bad port -> 1        PASS    PASS
-§11 usage: unknown option -> 1  PASS    PASS
-§11 usage: no URL -> 1          PASS    PASS
-§11 usage: URL too big -> 1     PASS    PASS
+test                                  C       Py
+IDs 1,2,3, one conn, host             PASS    PASS
+unknown frames + flag bits            PASS    PASS
+1-3 byte TCP segments                 PASS    PASS
+uneven + empty DATA frames            PASS    PASS
+GOAWAY after END is fine              PASS    PASS
+pending GOAWAY: no 2nd REQUEST        PASS    PASS
+wrong RESPONSE ID                     PASS    PASS
+DATA before RESPONSE                  PASS    PASS
+RESPONSE on ID 0                      PASS    PASS
+status 199                            PASS    PASS
+status 600                            PASS    PASS
+content-length mismatch               PASS    PASS
+content-length not digits             PASS    PASS
+EOF before END                        PASS    PASS
+EOF inside a frame                    PASS    PASS
+GOAWAY before END -> 2                PASS    PASS
+Length 16385                          PASS    PASS
+second RESPONSE                       PASS    PASS
+REQUEST from server                   PASS    PASS
+malformed header block                PASS    PASS
+c-l copies 2,3 -> 2                   PASS    PASS
+c-l 20 digits -> 2                    PASS    PASS
+c-l empty -> 2                        PASS    PASS
+c-l 007 = 7 bytes -> 0                PASS    PASS
+c-l 2,2 = 2 bytes -> 0                PASS    PASS
+c-l copies 2,02 -> 2                  PASS    PASS
+GOAWAY BUSY -> 2, no output           PASS    PASS
+§11 exit: 301 -> 0                    PASS    PASS
+§11 exit: 500 -> 5                    PASS    PASS
+§11 exit: 200,404 -> 4                PASS    PASS
+§11 exit: 404,500 -> 5                PASS    PASS
+§11 exit: 500,404 -> 5                PASS    PASS
+§11 exit: 2 beats 4 (404, bad)        PASS    PASS
+§11: closed, never reopened           PASS    PASS
+URL: #fragment not sent               PASS    PASS
+URL: host:port?q -> /?q               PASS    PASS
+URL: host:port -> /                   PASS    PASS
+URL: host:port#f -> /                 PASS    PASS
+URL: path sent unchanged              PASS    PASS
+§11 usage: two origins -> 1           PASS    PASS
+§11 usage: http:// -> 1               PASS    PASS
+§11 usage: bad port -> 1              PASS    PASS
+§11 usage: unknown option -> 1        PASS    PASS
+§11 usage: no URL -> 1                PASS    PASS
+§11 usage: URL too big -> 1           PASS    PASS
+§11 usage: -t 0 -> 1                  PASS    PASS
+§11 usage: -t x -> 1                  PASS    PASS
+§11 -t 2: silent server -> 2          PASS    PASS
+§11 -t 2: unknown frames != progress  PASS    PASS
+§11 -t 2: DATA every 1 s is progress  PASS    PASS
 
-300 checks: 300 passed, 0 failed, 0 skipped
+310 checks: 310 passed, 0 failed, 0 skipped
 ```
 
 Beyond the matrix, about 70 one-off probes were run against both servers and both clients
@@ -317,35 +328,29 @@ Every question raised during the review, and where the spec now answers it.
 | # | Question | Resolved by | Where |
 |---|---|---|---|
 | 1 | Should a server check a request's `content-length`, and how does it report a bad one? | `2867662` (bserve: `6e966cc`) | §6, §7: a bad `content-length` is a request error (400, connection kept) |
-| 2 | Client CLI: exit codes, URL grammar, default port, multiple URLs | `2867662` (bcurl: `9f74822`, `3918ebb`) | §11 Reference client |
+| 2 | Client CLI: exit codes, URL grammar, default port, multiple URLs | `2867662` (bcurl: `9f74822`, `3918ebb`) | §11 Reference client; the URL grammar is in the top-level README |
 | 3 | Repeated `content-length` with differing values | `2867662` (bcurl: `3918ebb`) | §6: further copies MUST be identical |
 | 4 | Request errors on ID 0 looked like connection errors | `2867662` (bserve: `6e966cc`) | §3, §7: a REQUEST, RESPONSE or DATA on ID 0 is a connection error |
-| 5 | Same-ID frames or GOAWAY while a request body is open | `2867662` | §7: anything but DATA for that ID, an unknown type, or GOAWAY (which ends the connection) |
+| 5 | Same-ID frames or GOAWAY while a request body is open | `2867662`, `cd6f0d2` | §7: "any *known* frame type other than DATA for that ID (unknown types are still skipped, §4; a GOAWAY just ends the connection)" |
 | 6 | Does a RESPONSE sent to a server open a body? | `2867662` | §6, §7: only a REQUEST opens a body |
 | 7 | GOAWAY racing the next request | `2867662` (bcurl: `a6f08af`) | §7 "Clients": GOAWAY before END means "not processed", MAY retry |
 | 8 | `content-length` grammar | `2867662` | §6: 1 to 19 ASCII digits, leading zeros allowed |
-| 9 | What the idle timer measures | `2867662`, then `2f6c21e` | §2: only a complete REQUEST (or DATA of an open body) resets T; unknown and partial frames don't |
+| 9 | What the idle timer measures | `2867662`, `2f6c21e`, `b059295` | §2: a complete REQUEST (in a body: a DATA frame of it) is needed within T; "other and partial frames do not extend T" |
 | 10 | HEAD on error statuses | `2867662`, `6fdab1a` | §6: every response to HEAD, whatever its status |
 | 11 | Is ROOT itself resolved? | `2867662` | §8: "resolved the same way" |
-| 12 | Date and media-type formats | `2867662` | §5.3: IMF-fixdate; §8: content-type table |
+| 12 | Date and media-type formats | `2867662`, `cd6f0d2` | §5.3: IMF-fixdate. §8 says `content-type` SHOULD follow the extension; bserve's table is in the top-level README |
 | 13 | "Payload under 3 bytes" (the real minimum is 4) | `2867662` | §7: "under 4 bytes" |
 | 14 | 301 `location` and the query | `3290045` | §7: path without the query, plus `/` |
 | 15 | `dir/` whose `index.html` is a directory | `3290045` | §8: 404 if the path already ended in `/` |
 | 16 | GOAWAY with a nonzero Request ID | `3290045` | §4: ignored on receipt |
 | 17 | Are `content-length` copies compared as bytes or as values (`3` vs `03`)? | `633e106` (bserve, bcurl: `e8964fe`) | §6: byte-for-byte identical; `3` and `03` are not |
-| 18 | Is a 400 to a malformed HEAD request "a response to HEAD"? | `633e106` (bserve: `15e7fc3`) | §6: any REQUEST whose Method byte is HEAD, a 400 too: END, no DATA |
-| 19 | Exit code for a URL whose REQUEST can't fit in one frame | `633e106` (bcurl: `f78d831`) | §11: usage error (1), nothing sent |
+| 18 | Is a 400 to a malformed HEAD request "a response to HEAD"? | `633e106` (bserve: `15e7fc3`) | §6: every response to a REQUEST whose Method byte is HEAD, "whatever its status": END, no DATA |
+| 19 | Exit code for a URL whose REQUEST can't fit in one frame | `633e106` (bcurl: `f78d831`) | §11: a usage error (exit 1) |
+| 20 | When does T restart after a REQUEST: on its arrival, or once it is answered? | `b059295` | §2: "within T seconds of accepting the connection or finishing the previous response" |
 
 ### Still open
 
-One small point, which affects nothing the matrix can observe today:
-
-- **§2: when T restarts after a REQUEST.** The text says T runs "without a complete
-  REQUEST". Both servers restart T when they *finish answering* a request, not when the
-  REQUEST arrives. The difference only matters if sending a response takes longer than T
-  (a large file to a slow reader): read literally, the server could time out as soon as
-  it finishes sending. **Suggested wording:** "T restarts when the server has answered a
-  REQUEST, and with each DATA frame of an open request body."
+None. The last open point (when T restarts) was settled by `b059295`; it is row 20 above.
 
 ## C findings
 
@@ -372,13 +377,16 @@ now a passing row in the matrix:
     - one origin and one connection, never reopened;
     - `bhttp://` only;
     - the host ends at `:`, `/`, `?` or `#`;
-    - a REQUEST too big for a frame is a usage error.
+    - a REQUEST too big for a frame is a usage error;
+    - `-t seconds` (default 30): give up when no RESPONSE or DATA of the current request
+      arrives in time, unknown frames not counting;
+    - never write body bytes past `content-length`.
   - pybserve treats ID-0 frames as connection errors.
   - The codec enforces the 1-19-digit, byte-identical `content-length` rule, and the
     minimum REQUEST payload is now 4 bytes.
   - pybserve:
     - sends no DATA in any response to a HEAD request;
-    - uses the §8 content-type table;
+    - uses bserve's content-type table;
     - sends the 301 `location` without the query, and gives 404 for `dir/` when
       `index.html` is a directory;
     - follows the request-only idle rule;
