@@ -3,7 +3,7 @@
  *
  *     bcurl [-v] [-t seconds] URL [URL...]
  *
- * URL is [bhttp://]host[:port][/path] (port 9000 if omitted). All URLs must
+ * URL is [bhttp://]host[:port][path] (port 9000 if omitted). All URLs must
  * name the same host and port: they are fetched in order over ONE TCP
  * connection, which is never reopened. Bodies go to stdout. -v dumps every
  * frame sent (>) and received (<) to stderr.
