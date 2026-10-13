@@ -354,9 +354,9 @@ static int on_frame(const struct client *c, const struct url *u, uint32_t id,
         return on_data(c, u, id, h, r);
     case BH_GOAWAY:
         bh_goaway_parse(c->rx + BH_HEADER_LEN, h->length, &g);
-        fprintf(stderr, "bcurl: %s: server sent GOAWAY (last-id %lu, code 0x%02x) before the "
+        fprintf(stderr, "bcurl: %s: server sent GOAWAY (last-id %lu, %s) before the "
                 "response was complete; the request was not processed\n", u->text,
-                (unsigned long)g.last_id, (unsigned)g.code);
+                (unsigned long)g.last_id, bh_goaway_code_name(g.code));
         return -1;
     case BH_REQUEST:
         return protocol_error(u, "server sent a REQUEST");
@@ -396,9 +396,9 @@ static int check_between_requests(struct client *c, const struct url *next)
             bh_dump_frame(stderr, '<', c->rx);
         if (h.type == BH_GOAWAY) {
             bh_goaway_parse(c->rx + BH_HEADER_LEN, h.length, &g);
-            fprintf(stderr, "bcurl: %s: server sent GOAWAY (last-id %lu, code 0x%02x); "
+            fprintf(stderr, "bcurl: %s: server sent GOAWAY (last-id %lu, %s); "
                     "not sending more requests\n", next->text, (unsigned long)g.last_id,
-                    (unsigned)g.code);
+                    bh_goaway_code_name(g.code));
             return -1;
         }
         if (bh_type_known(h.type))

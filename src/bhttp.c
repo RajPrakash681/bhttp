@@ -415,6 +415,15 @@ void bh_goaway_parse(const uint8_t *p, size_t n, struct bh_goaway *g)
     g->code = p[4];   /* raw; anything but BH_NO_ERROR means BH_PROTOCOL_ERROR */
 }
 
+const char *bh_goaway_code_name(uint8_t code)
+{
+    switch (code) {
+    case BH_NO_ERROR: return "NO_ERROR";
+    case BH_BUSY:     return "BUSY";
+    default:          return "PROTOCOL_ERROR";
+    }
+}
+
 /* ---- helpers ---------------------------------------------------------- */
 
 const char *bh_reason(unsigned status)

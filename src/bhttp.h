@@ -27,6 +27,7 @@
 /* SPEC 4: GOAWAY codes. */
 #define BH_NO_ERROR       0x00u
 #define BH_PROTOCOL_ERROR 0x01u
+#define BH_BUSY           0x02u   /* refused: the server is at capacity */
 
 /* SPEC 5.1: method codes. */
 enum bh_method {
@@ -121,8 +122,7 @@ int bh_response_parse(const uint8_t *p, size_t n, struct bh_response *rs, const 
 
 /*
  * GOAWAY payload (SPEC 4): never fails; a short payload reads as Last-ID 0,
- * Code 0x01. `code` is the raw byte: treat any value but BH_NO_ERROR as
- * BH_PROTOCOL_ERROR.
+ * Code 0x01. `code` is the raw byte; bh_goaway_code_name() names it.
  */
 struct bh_goaway {
     uint32_t last_id;
@@ -130,6 +130,8 @@ struct bh_goaway {
 };
 
 void bh_goaway_parse(const uint8_t *p, size_t n, struct bh_goaway *g);
+/* "NO_ERROR", "BUSY", or "PROTOCOL_ERROR" (which every unknown code means). */
+const char *bh_goaway_code_name(uint8_t code);
 
 /*
  * SPEC 6: content-length in a well-formed header block. It must be 1..19

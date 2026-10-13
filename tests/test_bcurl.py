@@ -212,6 +212,7 @@ class TestAgainstFakeServer(unittest.TestCase):
     BROKEN = [
         ("oversized frame", lambda rid: struct.pack(">HBBI", 20000, w.RESPONSE, 0, rid)),
         ("GOAWAY first", lambda rid: w.goaway(0, w.NO_ERROR)),
+        ("GOAWAY BUSY", lambda rid: w.goaway(0, w.BUSY)),
         ("wrong id", reply(200, b"x", rid_override=77)),
         ("connection error id 0", reply(400, b"x", rid_override=0)),
         ("DATA before RESPONSE", lambda rid: w.frame(w.DATA, w.END, rid, b"x")),

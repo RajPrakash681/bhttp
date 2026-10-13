@@ -96,7 +96,7 @@ static void describe(FILE *out, const struct bh_header *h, const uint8_t *pl,
         struct bh_goaway g;
         bh_goaway_parse(pl, h->length, &g);
         fprintf(out, "last-id=%lu code=0x%02x (%s)", (unsigned long)g.last_id, g.code,
-                g.code == BH_NO_ERROR ? "NO_ERROR" : "PROTOCOL_ERROR");
+                bh_goaway_code_name(g.code));
         return;
     }
     default:
