@@ -3,7 +3,8 @@
  *
  *     bserve [-t idle_seconds] [-c max_connections] ROOT PORT
  *
- * Listens on 0.0.0.0:PORT (0 picks a free port; the log line says which) and
+ * Listens on PORT on every IPv4 and IPv6 address (one dual-stack socket; IPv4
+ * only on a host without IPv6; 0 picks a free port and the log says which) and
  * forks one process per connection. Each process reads frames until the peer
  * closes, the connection idles out, or the framing breaks (SPEC 2, 7).
  *
@@ -765,21 +766,32 @@ static void serve(struct conn *c)
              c->requests == 1 ? "" : "s");
 }
 
+/*
+ * "a.b.c.d:port" for IPv4 peers, including those that reach the dual-stack
+ * listener as IPv4-mapped IPv6 addresses (::ffff:a.b.c.d); "[addr]:port" for
+ * IPv6 peers.
+ */
 static void format_peer(const struct sockaddr_storage *ss, char *out, size_t cap)
 {
     char addr[INET6_ADDRSTRLEN] = "?";
-    unsigned port = 0;
 
     if (ss->ss_family == AF_INET) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)(const void *)ss;
         inet_ntop(AF_INET, &sin->sin_addr, addr, sizeof addr);
-        port = ntohs(sin->sin_port);
+        snprintf(out, cap, "%s:%u", addr, (unsigned)ntohs(sin->sin_port));
     } else if (ss->ss_family == AF_INET6) {
         const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)(const void *)ss;
-        inet_ntop(AF_INET6, &sin6->sin6_addr, addr, sizeof addr);
-        port = ntohs(sin6->sin6_port);
+        unsigned port = ntohs(sin6->sin6_port);
+        if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) {
+            inet_ntop(AF_INET, &sin6->sin6_addr.s6_addr[12], addr, sizeof addr);
+            snprintf(out, cap, "%s:%u", addr, port);
+        } else {
+            inet_ntop(AF_INET6, &sin6->sin6_addr, addr, sizeof addr);
+            snprintf(out, cap, "[%s]:%u", addr, port);
+        }
+    } else {
+        snprintf(out, cap, "?");
     }
-    snprintf(out, cap, "%s:%u", addr, port);
 }
 
 /* Runs in the child process. Returns its exit status. */
@@ -984,29 +996,68 @@ static void run_listener(struct listener *l, const struct config *cfg)
 
 /* ---- startup ---------------------------------------------------------- */
 
-static int open_listener(unsigned port, unsigned *bound)
+/* Binds, listens and reports the bound port; -1 with errno on failure. */
+static int bind_listen(int fd, struct sockaddr *sa, socklen_t len, unsigned *bound)
 {
-    struct sockaddr_in sa;
-    socklen_t len = sizeof sa;
+    struct sockaddr_storage got;
+    socklen_t glen = sizeof got;
     int one = 1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
 
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
+        bind(fd, sa, len) != 0 || listen(fd, LISTEN_BACKLOG) != 0 ||
+        getsockname(fd, (struct sockaddr *)&got, &glen) != 0)
+        return -1;
+    if (got.ss_family == AF_INET6)
+        *bound = ntohs(((const struct sockaddr_in6 *)(const void *)&got)->sin6_port);
+    else
+        *bound = ntohs(((const struct sockaddr_in *)(const void *)&got)->sin_port);
+    return 0;
+}
+
+/*
+ * One listening socket for every address: IPv6 with IPV6_V6ONLY off, so IPv4
+ * clients arrive as IPv4-mapped addresses. A host without IPv6 gets a plain
+ * IPv4 socket instead (*dual = 0). Returns the socket, or -1 with errno.
+ */
+static int open_listener(unsigned port, unsigned *bound, int *dual)
+{
+    struct sockaddr_in6 sa6;
+    struct sockaddr_in sa;
+    int off = 0;
+    int saved;
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+
+    if (fd >= 0) {
+        memset(&sa6, 0, sizeof sa6);
+        sa6.sin6_family = AF_INET6;
+        sa6.sin6_addr = in6addr_any;
+        sa6.sin6_port = htons((uint16_t)port);
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off) == 0 &&
+            bind_listen(fd, (struct sockaddr *)&sa6, sizeof sa6, bound) == 0) {
+            *dual = 1;
+            return fd;
+        }
+        saved = errno;
+        close(fd);
+        if (saved == EADDRINUSE) {   /* the port is taken; IPv4 would not help */
+            errno = saved;
+            return -1;
+        }
+    }
+    fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     sa.sin_port = htons((uint16_t)port);
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
-        bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
-        listen(fd, LISTEN_BACKLOG) != 0 ||
-        getsockname(fd, (struct sockaddr *)&sa, &len) != 0) {
-        int saved = errno;
+    if (bind_listen(fd, (struct sockaddr *)&sa, sizeof sa, bound) != 0) {
+        saved = errno;
         close(fd);
         errno = saved;
         return -1;
     }
-    *bound = ntohs(sa.sin_port);
+    *dual = 0;
     return fd;
 }
 
@@ -1028,7 +1079,7 @@ static int parse_uint(const char *s, unsigned long max, unsigned long *out)
 static void usage(void)
 {
     fputs("usage: bserve [-t idle_seconds] [-c max_connections] ROOT PORT\n"
-          "  serves the files under ROOT over bhttp/1 on 0.0.0.0:PORT (0 = any free port)\n"
+          "  serves the files under ROOT over bhttp/1 on PORT, IPv4 and IPv6 (0 = any free port)\n"
           "  -t  close a connection with no request for this long (default 30 s)\n"
           "  -c  serve at most this many connections at once; refuse the rest with\n"
           "      GOAWAY BUSY (default 64)\n",
@@ -1043,6 +1094,8 @@ int main(int argc, char **argv)
     unsigned long max_conns = DEFAULT_MAX_CONNECTIONS;
     unsigned long port;
     unsigned bound;
+    int dual;
+    char also[24] = "";
     struct stat st;
     int opt;
     int lfd;
@@ -1075,14 +1128,16 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer is a write error, not a signal */
     signal(SIGCHLD, SIG_DFL);   /* reaped in the accept loop, to count them */
 
-    lfd = open_listener((unsigned)port, &bound);
+    lfd = open_listener((unsigned)port, &bound, &dual);
     if (lfd < 0) {
         fprintf(stderr, "bserve: port %lu: %s\n", port, strerror(errno));
         return 1;
     }
     set_blocking(lfd, 0);   /* poll() said readable, but accept() must never wait */
-    log_line("bserve: listening on 0.0.0.0:%u, root %s, idle timeout %lus, max %lu connections",
-             bound, argv[optind], idle, max_conns);
+    if (dual)
+        snprintf(also, sizeof also, " and [::]:%u", bound);
+    log_line("bserve: listening on 0.0.0.0:%u%s, root %s, idle timeout %lus, max %lu connections",
+             bound, also, argv[optind], idle, max_conns);
     listener.fd = lfd;
     listener.max_conns = max_conns;
     run_listener(&listener, &cfg);

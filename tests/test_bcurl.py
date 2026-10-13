@@ -100,6 +100,18 @@ class TestAgainstBserve(harness.SiteServerCase, unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(self.connects(), before)
 
+    def test_ipv6_loopback(self):
+        """bserve listens dual-stack; bcurl takes a bracketed IPv6 host."""
+        if " and [::]:" not in self.server.log():
+            self.skipTest("bserve fell back to IPv4 only (no IPv6 on this host)")
+        try:
+            socket.create_connection(("::1", self.server.port), timeout=2).close()
+        except OSError as e:
+            self.skipTest("no IPv6 loopback here: %s" % e)
+        rc, out, err = harness.run_bcurl("[::1]:%d/hello.txt" % self.server.port)
+        self.assertEqual((rc, out, err), (0, self.file_bytes("hello.txt"), ""))
+        self.server.wait_for(r"^\S+ \[::1\]:\d+ GET /hello\.txt 200 ")
+
     def test_usage_errors_exit_1(self):
         self.assertEqual(harness.run_bcurl()[0], 1)
         self.assertEqual(harness.run_bcurl("http://127.0.0.1:9/")[0], 1)
