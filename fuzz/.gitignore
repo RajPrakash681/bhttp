@@ -1,0 +1,8 @@
+seeds/
+work/
+out/
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
