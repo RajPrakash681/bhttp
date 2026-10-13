@@ -1,6 +1,7 @@
 """Conformance tests for bserve, speaking raw bytes built from SPEC.md."""
 import os
 import random
+import select
 import socket
 import struct
 import subprocess
@@ -502,6 +503,45 @@ class TestRobustness(ServerCase):
         self.with_seed(body)
 
 
+class TestCapacity(harness.SiteServerCase, unittest.TestCase):
+    server_args = ("-c", "3")
+
+    def test_extra_connections_get_goaway_busy(self):
+        held = []
+        for rid in range(3):                  # fill every slot
+            s = w.connect(self.server.port)
+            s.sendall(w.request(1, "/hello.txt"))
+            self.assertEqual(w.read_response(s, 1).status, 200)
+            held.append(s)
+        for _ in range(2):                    # the extras are turned away
+            s = w.connect(self.server.port)
+            f = w.read_frame(s)
+            self.assertEqual((f.type, f.id), (w.GOAWAY, 0))
+            self.assertEqual(w.parse_goaway(f.payload), (0, w.BUSY))
+            self.assertIsNone(w.read_frame(s))
+            s.close()
+        self.server.wait_for(r" refused \(at capacity\)", count=2)
+        held.pop().close()                    # free one slot
+        # The slot is free once that connection's process has exited, which
+        # is a moment after it logs "close": retry until a request gets in.
+        deadline = time.time() + 10
+        while True:
+            s = w.connect(self.server.port)
+            s.sendall(w.request(1, "/hello.txt"))
+            f = w.read_frame(s)
+            if f is not None and f.type == w.RESPONSE:
+                self.assertEqual(w.parse_response(f.payload)[0], 200)
+                s.close()
+                break
+            if f is not None:                 # None: refused, and the close raced us
+                self.assertEqual(w.parse_goaway(f.payload), (0, w.BUSY))
+            s.close()
+            self.assertLess(time.time(), deadline, "no slot freed up")
+            time.sleep(0.1)
+        for s in held:
+            s.close()
+
+
 class TestIdleTimeout(harness.SiteServerCase, unittest.TestCase):
     idle = 1
 
@@ -515,6 +555,34 @@ class TestIdleTimeout(harness.SiteServerCase, unittest.TestCase):
         self.assertEqual(w.parse_goaway(f.payload), (1, w.NO_ERROR))
         self.assertGreaterEqual(time.time() - start, 0.8)
         self.assertIsNone(w.read_frame(s))
+        s.close()
+
+    def test_unknown_frames_do_not_keep_a_connection_alive(self):
+        s = w.connect(self.server.port)
+        start = time.time()
+        got = None
+        while got is None and time.time() - start < 5:
+            s.sendall(w.frame(0x42, 0, 0, b"keepalive?"))
+            readable, _, _ = select.select([s], [], [], 0.25)
+            if readable:
+                got = w.read_frame(s)
+        self.assertIsNotNone(got, "no GOAWAY while unknown frames kept arriving")
+        self.assertEqual((got.type, w.parse_goaway(got.payload)[1]), (w.GOAWAY, w.NO_ERROR))
+        self.assertLess(time.time() - start, 2.5)
+        s.close()
+
+    def test_unknown_frames_inside_a_body_do_not_extend_it(self):
+        s = w.connect(self.server.port)
+        s.sendall(w.request(1, "/hello.txt", flags=0))   # a body is now open
+        start = time.time()
+        got = None
+        while got is None and time.time() - start < 5:
+            s.sendall(w.frame(0x42, 0, 1, b"not body"))
+            readable, _, _ = select.select([s], [], [], 0.25)
+            if readable:
+                got = w.read_frame(s)
+        self.assertEqual(got.type, w.GOAWAY)
+        self.assertLess(time.time() - start, 2.5)
         s.close()
 
     def test_slow_frame_hits_the_deadline(self):

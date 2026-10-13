@@ -86,9 +86,10 @@ def remove_site(base):
 class Server(object):
     """bserve on a free port, with its stderr captured in a log file."""
 
-    def __init__(self, root, idle=None):
+    def __init__(self, root, idle=None, args=()):
         self.root = root
         self.idle = idle
+        self.args = list(args)
         self.log_path = os.path.join(os.path.dirname(root), "bserve-%d.log" % id(self))
         self.proc = None
         self.port = None
@@ -98,7 +99,7 @@ class Server(object):
         args = [BSERVE]
         if self.idle is not None:
             args += ["-t", str(self.idle)]
-        args += [self.root, "0"]
+        args += self.args + [self.root, "0"]
         self._log = open(self.log_path, "ab")
         self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=self._log, start_new_session=True,
@@ -144,12 +145,13 @@ class SiteServerCase(object):
     """Mixin: one bserve per test class, over a fresh fixture site."""
 
     idle = None
+    server_args = ()
 
     @classmethod
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="bhttp-test-")
         cls.root = make_site(cls.base)
-        cls.server = Server(cls.root, idle=cls.idle).start()
+        cls.server = Server(cls.root, idle=cls.idle, args=cls.server_args).start()
 
     @classmethod
     def tearDownClass(cls):

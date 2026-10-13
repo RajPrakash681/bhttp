@@ -32,11 +32,13 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #define SERVER_NAME "bserve/1.0"
 #define DEFAULT_IDLE_SECONDS 30
+#define DEFAULT_MAX_CONNECTIONS 64
 #define LINGER_MS 2000
 #define LINGER_MAX_BYTES (1u << 20)
 #define LISTEN_BACKLOG 64
@@ -535,12 +537,18 @@ static enum next connection_error(struct conn *c, const char *detail, const char
     return CLOSE_LINGER;
 }
 
-/* Reads the next frame into c->rx; anything but KEEP ends the connection. */
-static enum next next_frame(struct conn *c, struct bh_header *h, const char **why)
+/*
+ * Reads the next frame into c->rx; anything but KEEP ends the connection.
+ * The caller owns the deadline (SPEC 2): only a complete REQUEST, or a DATA
+ * frame of an open request body, earns a new one, so a peer that trickles
+ * unknown frames cannot keep a connection, and its process, for ever.
+ */
+static enum next next_frame(struct conn *c, struct bh_header *h, int64_t deadline,
+                            const char **why)
 {
     char detail[80];
 
-    switch (bh_read_frame(c->fd, c->rx, h, io_now_ms() + c->cfg->idle_ms)) {
+    switch (bh_read_frame(c->fd, c->rx, h, deadline)) {
     case BH_IO_OK:
         return KEEP;
     case BH_IO_EOF:
@@ -569,9 +577,11 @@ static enum next next_frame(struct conn *c, struct bh_header *h, const char **wh
  */
 static enum next drain_body(struct conn *c, uint32_t id, uint64_t *body, const char **why)
 {
+    int64_t deadline = io_now_ms() + c->cfg->idle_ms;
+
     for (;;) {
         struct bh_header h;
-        enum next nx = next_frame(c, &h, why);
+        enum next nx = next_frame(c, &h, deadline, why);
 
         if (nx != KEEP)
             return nx;
@@ -579,6 +589,7 @@ static enum next drain_body(struct conn *c, uint32_t id, uint64_t *body, const c
             *body += h.length;
             if (h.flags & BH_FLAG_END)
                 return KEEP;
+            deadline = io_now_ms() + c->cfg->idle_ms;
         } else if (h.type == BH_GOAWAY) {
             *why = "peer sent GOAWAY";
             return CLOSE;
@@ -685,15 +696,19 @@ static enum next on_frame(struct conn *c, const struct bh_header *h, const char 
 static void serve(struct conn *c)
 {
     const char *why = "closed";
+    int64_t deadline = io_now_ms() + c->cfg->idle_ms;
     enum next nx = KEEP;
 
     log_line("%s connect", c->peer);
     while (nx == KEEP) {
         struct bh_header h;
 
-        nx = next_frame(c, &h, &why);
-        if (nx == KEEP)
-            nx = on_frame(c, &h, &why);
+        nx = next_frame(c, &h, deadline, &why);
+        if (nx != KEEP)
+            break;
+        nx = on_frame(c, &h, &why);
+        if (h.type == BH_REQUEST)   /* only requests count as activity */
+            deadline = io_now_ms() + c->cfg->idle_ms;
     }
     if (nx == CLOSE_LINGER)
         linger_close(c->fd);
@@ -746,6 +761,48 @@ static int handle_connection(const struct config *cfg, int fd, const struct sock
     return 0;
 }
 
+/* ---- capacity --------------------------------------------------------- */
+
+/*
+ * Turns a connection away from the listening process: GOAWAY with code BUSY
+ * and Last-ID 0 (nothing was processed), then close. The listener must never
+ * wait on a client, so the socket is made non-blocking first; whatever input
+ * is already there is drained so that the close does not reset the GOAWAY.
+ */
+static void refuse(int fd, const struct sockaddr_storage *ss, const char *reason)
+{
+    uint8_t frame[BH_HEADER_LEN + 5];
+    uint8_t sink[4096];
+    struct bh_header h = { 5, BH_GOAWAY, 0, 0 };
+    char peer[INET6_ADDRSTRLEN + 8];
+    int flags = fcntl(fd, F_GETFL);
+    size_t drained = 0;
+    ssize_t r;
+
+    memset(frame, 0, sizeof frame);   /* Last-ID 0 */
+    frame[BH_HEADER_LEN + 4] = BH_BUSY;
+    bh_header_encode(&h, frame);
+    if (flags >= 0)
+        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    (void)send(fd, frame, sizeof frame, 0);
+    while (drained < sizeof sink * 16 && (r = recv(fd, sink, sizeof sink, 0)) > 0)
+        drained += (size_t)r;
+    (void)shutdown(fd, SHUT_WR);
+    close(fd);
+    format_peer(ss, peer, sizeof peer);
+    log_line("%s refused (%s)", peer, reason);
+}
+
+/* Reaps every connection process that has exited; returns how many. */
+static unsigned long reap_children(void)
+{
+    unsigned long n = 0;
+
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        n++;
+    return n;
+}
+
 /* ---- startup ---------------------------------------------------------- */
 
 static int open_listener(unsigned port, unsigned *bound)
@@ -791,8 +848,11 @@ static int parse_uint(const char *s, unsigned long max, unsigned long *out)
 
 static void usage(void)
 {
-    fputs("usage: bserve [-t idle_seconds] ROOT PORT\n"
-          "  serves the files under ROOT over bhttp/1 on 0.0.0.0:PORT (0 = any free port)\n",
+    fputs("usage: bserve [-t idle_seconds] [-c max_connections] ROOT PORT\n"
+          "  serves the files under ROOT over bhttp/1 on 0.0.0.0:PORT (0 = any free port)\n"
+          "  -t  close a connection with no request for this long (default 30 s)\n"
+          "  -c  serve at most this many connections at once; refuse the rest with\n"
+          "      GOAWAY BUSY (default 64)\n",
           stderr);
 }
 
@@ -800,14 +860,18 @@ int main(int argc, char **argv)
 {
     static struct config cfg;
     unsigned long idle = DEFAULT_IDLE_SECONDS;
+    unsigned long max_conns = DEFAULT_MAX_CONNECTIONS;
+    unsigned long live = 0;   /* connection processes not yet reaped */
     unsigned long port;
     unsigned bound;
     struct stat st;
     int opt;
     int lfd;
 
-    while ((opt = getopt(argc, argv, "t:h")) != -1) {
+    while ((opt = getopt(argc, argv, "t:c:h")) != -1) {
         if (opt == 't' && parse_uint(optarg, 3600, &idle) == 0 && idle > 0)
+            continue;
+        if (opt == 'c' && parse_uint(optarg, 100000, &max_conns) == 0 && max_conns > 0)
             continue;
         usage();
         return opt == 'h' ? 0 : 1;
@@ -830,19 +894,21 @@ int main(int argc, char **argv)
     cfg.idle_ms = (int)idle * 1000;
 
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer is a write error, not a signal */
-    signal(SIGCHLD, SIG_IGN);   /* connection processes are reaped automatically */
+    signal(SIGCHLD, SIG_DFL);   /* reaped in the accept loop, to count them */
 
     lfd = open_listener((unsigned)port, &bound);
     if (lfd < 0) {
         fprintf(stderr, "bserve: port %lu: %s\n", port, strerror(errno));
         return 1;
     }
-    log_line("bserve: listening on 0.0.0.0:%u, root %s, idle timeout %lus", bound, cfg.root, idle);
+    log_line("bserve: listening on 0.0.0.0:%u, root %s, idle timeout %lus, max %lu connections",
+             bound, cfg.root, idle, max_conns);
 
     for (;;) {
         struct sockaddr_storage ss;
         socklen_t sl = sizeof ss;
         int fd = accept(lfd, (struct sockaddr *)&ss, &sl);
+        unsigned long reaped;
         pid_t pid;
 
         if (fd < 0) {
@@ -853,13 +919,22 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        reaped = reap_children();
+        live = reaped < live ? live - reaped : 0;
+        if (live >= max_conns) {
+            refuse(fd, &ss, "at capacity");
+            continue;
+        }
         pid = fork();
         if (pid == 0) {
             close(lfd);
             exit(handle_connection(&cfg, fd, &ss));
         }
-        if (pid < 0)
-            log_line("bserve: fork: %s", strerror(errno));
+        if (pid < 0) {
+            refuse(fd, &ss, strerror(errno));
+            continue;
+        }
+        live++;
         close(fd);
     }
 }
