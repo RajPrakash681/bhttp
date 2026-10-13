@@ -1,7 +1,7 @@
 # Annotated hexdump: one request, one response
 
 One complete bhttp/1 exchange, captured from a real run of the release build on macOS
-(Apple Silicon) on 2026-10-08, then taken apart byte by byte. The body is `www/hello.txt`
+(Apple Silicon) on 2026-10-13, then taken apart byte by byte. The body is `www/hello.txt`
 (14 bytes), so the whole exchange is three frames: 56 bytes from the client, 120 + 22
 bytes from the server.
 
@@ -34,15 +34,15 @@ stderr:
 <     content-type: text/plain; charset=utf-8   [index 4]
 <     content-length: 14   [index 5]
 <     last-modified: Thu, 08 Oct 2026 12:01:37 GMT   [index 6]
-<     date: Thu, 08 Oct 2026 12:08:46 GMT   [index 7]
+<     date: Tue, 13 Oct 2026 05:52:22 GMT   [index 7]
 <     server: bserve/1.0   [index 8]
 <   0000  00 70 02 00 00 00 00 01  00 c8 04 00 19 74 65 78  |.p...........tex|
 <   0010  74 2f 70 6c 61 69 6e 3b  20 63 68 61 72 73 65 74  |t/plain; charset|
 <   0020  3d 75 74 66 2d 38 05 00  02 31 34 06 00 1d 54 68  |=utf-8...14...Th|
 <   0030  75 2c 20 30 38 20 4f 63  74 20 32 30 32 36 20 31  |u, 08 Oct 2026 1|
-<   0040  32 3a 30 31 3a 33 37 20  47 4d 54 07 00 1d 54 68  |2:01:37 GMT...Th|
-<   0050  75 2c 20 30 38 20 4f 63  74 20 32 30 32 36 20 31  |u, 08 Oct 2026 1|
-<   0060  32 3a 30 38 3a 34 36 20  47 4d 54 08 00 0a 62 73  |2:08:46 GMT...bs|
+<   0040  32 3a 30 31 3a 33 37 20  47 4d 54 07 00 1d 54 75  |2:01:37 GMT...Tu|
+<   0050  65 2c 20 31 33 20 4f 63  74 20 32 30 32 36 20 30  |e, 13 Oct 2026 0|
+<   0060  35 3a 35 32 3a 32 32 20  47 4d 54 08 00 0a 62 73  |5:52:22 GMT...bs|
 <   0070  65 72 76 65 2f 31 2e 30                           |erve/1.0|
 < DATA id=1 length=14 flags=0x01 (END): 14 body bytes
 <   0000  00 0e 03 01 00 00 00 01  48 65 6c 6c 6f 2c 20 62  |........Hello, b|
@@ -60,10 +60,10 @@ exit=0
 The server's log for the same run (stderr of `bserve`):
 
 ```text
-2026-10-08T12:08:45Z bserve: listening on 0.0.0.0:9000, root /Users/rajprakash/devops-work/bhttp/www, idle timeout 30s
-2026-10-08T12:08:46Z 127.0.0.1:65093 connect
-2026-10-08T12:08:46Z 127.0.0.1:65093 GET /hello.txt 200 14
-2026-10-08T12:08:46Z 127.0.0.1:65093 close (peer closed, 1 request)
+2026-10-13T05:52:22Z bserve: listening on 0.0.0.0:9000, root /Users/rajprakash/devops-work/bhttp/www, idle timeout 30s, max 64 connections
+2026-10-13T05:52:22Z 127.0.0.1:64748 connect
+2026-10-13T05:52:22Z 127.0.0.1:64748 GET /hello.txt 200 14
+2026-10-13T05:52:22Z 127.0.0.1:64748 close (peer closed, 1 request)
 ```
 
 ## Frame 1: REQUEST, client to server (56 bytes)
@@ -131,10 +131,10 @@ off   bytes                    field         meaning
       37 20 47 4d 54
 004b  07                       Index         7 = date
 004c  00 1d                    VLen          29
-004e  54 68 75 2c 20 30 38 20  Value         "Thu, 08 Oct 2026 12:08:46 GMT"
+004e  54 75 65 2c 20 31 33 20  Value         "Tue, 13 Oct 2026 05:52:22 GMT"
       4f 63 74 20 32 30 32 36
-      20 31 32 3a 30 38 3a 34
-      36 20 47 4d 54
+      20 30 35 3a 35 32 3a 32
+      32 20 47 4d 54
 006b  08                       Index         8 = server
 006c  00 0a                    VLen          10
 006e  62 73 65 72 76 65 2f 31  Value         "bserve/1.0"
