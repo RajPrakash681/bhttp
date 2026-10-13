@@ -24,7 +24,7 @@ programs in every pairing.
 `bcurl` share one C codec, a C-to-C test alone cannot tell a protocol from an
 implementation. So [interop/](interop/) adds a second client and server, written in Python
 from SPEC.md only, and cross-tests all four pairings (C↔C, C↔Python, Python↔C,
-Python↔Python): 298 of 298 checks pass, and CI runs them on every push.
+Python↔Python): all 298 checks pass (300 with `--slow`), and CI runs them on every push.
 
 ### The brief, line by line
 
@@ -41,7 +41,7 @@ Python↔Python): 298 of 298 checks pass, and CI runs them on every push.
 | `-v` hexdumps every frame | §11 | `test_verbose_hexdumps_every_frame` |
 | exit non-zero on 4xx / 5xx | §11 | `test_404_exits_4`, `test_5xx_exits_5`, `test_worst_status_wins` |
 | and never open a second connection | §2, §11 | `test_multiple_urls_share_one_connection`, `test_never_opens_a_second_connection` |
-| a fixed-size frame header, widths defended; HTTP/2 chose 24 / 8 / 8 / 31, why? | §3 | `tests/unit_test.c` |
+| a fixed-size frame header, widths defended; HTTP/2 chose 24 / 8 / 8 / 31, why? | §3 | answered in SPEC §3; the header layout itself is checked by `tests/unit_test.c` |
 | number the ten names you send, length-prefix the rest | §5 | `test_static_table_names_sent_indexed`, `test_literal_and_unknown_request_headers` |
 | a receiver meeting an unknown frame type MUST skip it | §4, §9 | `test_unknown_types_before_request_are_skipped`, `test_unknown_types_between_requests`, `test_unknown_frames_are_skipped`, `test_unknown_frames_between_responses_are_skipped` |
 
@@ -49,9 +49,10 @@ Python↔Python): 298 of 298 checks pass, and CI runs them on every push.
 
 - `make test`: C unit tests for the codec and 77 conformance tests, run against
   AddressSanitizer + UndefinedBehaviorSanitizer builds, on macOS (clang) and Linux (gcc).
-- `make interop`: the 298-check cross-implementation matrix ([interop/README.md](interop/README.md)).
+- `make interop`: the cross-implementation matrix, 298 checks (300 with `--slow`) ([interop/README.md](interop/README.md)).
 - [fuzz/](fuzz/): libFuzzer harnesses for every parser plus network fuzzers for both
-  programs; about 400 million executions with no crash, sanitizer report or leak
+  programs; about 400 million executions on 633e106 and 7ce6503, then a re-run on d98fb56
+  of the targets the later fixes touched; no crash, sanitizer report or leak
   ([fuzz/README.md](fuzz/README.md)).
 - CI: `make`, `make test` and `make interop` on Ubuntu (gcc and clang) and macOS (clang),
   plus a check that SPEC.pdf is at most two pages.
@@ -206,9 +207,8 @@ $ make test
 
 builds the sanitizer binaries in `build/debug/` (`-fsanitize=address,undefined`), runs the
 C unit tests for the codec, then the conformance suite in `tests/`. The suite is Python 3
-standard library only (3.9 or later) and is a second, independent implementation of the
-protocol written from SPEC.md: `tests/bhttp_wire.py` builds and parses frames itself and
-never calls the C code. It covers:
+standard library only (3.9 or later) and has its own wire codec, written from SPEC.md:
+`tests/bhttp_wire.py` builds and parses frames itself and never calls the C code. It covers:
 
 - **bserve:** 200 with correct headers and bytes; 404, 301, 403, 405; HEAD; query strings;
   raw-byte paths; 400 for 26 kinds of malformed payload, each followed by a valid request
@@ -240,7 +240,7 @@ The fuzz tests take their seed from `FUZZ_SEED` if set, and print it on failure.
 $ make interop
 ```
 
-runs the partner implementation's matrix in [interop/](interop/): every pairing of the C
+runs the matrix of the Python client and server in [interop/](interop/): every pairing of the C
 and Python clients and servers, plus raw-frame conformance checks against both servers and
 both clients. [fuzz/](fuzz/) holds libFuzzer harnesses and network fuzzers (see
 fuzz/README.md). GitHub Actions runs `make`, `make test` and `make interop` on Ubuntu (gcc
@@ -259,7 +259,7 @@ src/bserve.c          the server
 src/bcurl.c           the client
 www/                  sample site: index.html, style.css, logo.png, hello.txt
 tests/unit_test.c     C unit tests for the codec
-tests/bhttp_wire.py   independent Python implementation of the wire format
+tests/bhttp_wire.py   the test suite's own wire codec, written from SPEC.md
 tests/test_*.py       conformance tests for bserve and bcurl
 tests/run_tests.py    test runner used by make test
 tools/                renders SPEC.md to SPEC.pdf and checks its page count;
