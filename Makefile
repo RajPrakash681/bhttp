@@ -3,6 +3,7 @@
 #   make          release build: ./bserve and ./bcurl
 #   make debug    ASan + UBSan build in build/debug/
 #   make test     unit tests + conformance tests against the debug build
+#   make interop  cross-test against the independent Python pair in interop/
 #   make clean
 
 CC      ?= cc
@@ -28,7 +29,7 @@ DBG_DIR  = build/debug
 REL_COMMON = $(COMMON:%=$(REL_DIR)/%.o)
 DBG_COMMON = $(COMMON:%=$(DBG_DIR)/%.o)
 
-.PHONY: all debug test clean
+.PHONY: all debug test interop clean
 
 all: bserve bcurl
 
@@ -64,6 +65,9 @@ $(REL_DIR) $(DBG_DIR):
 test: debug
 	$(DBG_DIR)/unit_test
 	BSERVE=$(DBG_DIR)/bserve BCURL=$(DBG_DIR)/bcurl $(PYTHON) tests/run_tests.py
+
+interop: all
+	$(PYTHON) interop/run_interop.py
 
 clean:
 	rm -rf build bserve bcurl
