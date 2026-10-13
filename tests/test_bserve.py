@@ -370,6 +370,13 @@ class TestPaths(ServerCase):
             with self.subTest(path=path[:40]):
                 self.assertEqual(self.get(path).status, 404)
 
+    def test_search_only_directory(self):
+        """Lookup needs a directory's x permission only, not r (mode 0311)."""
+        r = self.get("/pub/file.txt")
+        self.assertEqual((r.status, r.body), (200, b"in a search-only directory\n"))
+        self.assertEqual(self.get("/pub").status, 301)
+        self.assertEqual(self.get("/pub/").status, 404)   # no index.html, no listing
+
     def test_symlink_inside_root_is_served(self):
         self.assertEqual(self.get("/link-in").body, self.file_bytes("hello.txt"))
 
@@ -501,6 +508,17 @@ class TestRobustness(ServerCase):
                 self.assertIn(r.status, (200, 301, 400, 404, 405), "rid %d" % rid)
             self.assert_alive(1000)
         self.with_seed(body)
+
+
+class TestSearchOnlyRoot(harness.SiteServerCase, unittest.TestCase):
+    root_mode = 0o311   # ROOT itself can be searched but not listed
+
+    def test_files_are_served(self):
+        s = w.connect(self.server.port)
+        for rid, path in ((1, "/hello.txt"), (2, "/"), (3, "/pub/file.txt")):
+            s.sendall(w.request(rid, path))
+            self.assertEqual(w.read_response(s, rid).status, 200, path)
+        s.close()
 
 
 class TestCapacity(harness.SiteServerCase, unittest.TestCase):

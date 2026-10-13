@@ -71,15 +71,22 @@ def make_site(base):
     with open(os.path.join(root, "swap", "secret.txt"), "w") as f:
         f.write("inside the root\n")
     os.symlink(os.path.join(base, "outside"), os.path.join(root, ".swaplink"))
+    # a search-only directory: its files can be looked up, it cannot be listed
+    os.mkdir(os.path.join(root, "pub"))
+    with open(os.path.join(root, "pub", "file.txt"), "w") as f:
+        f.write("in a search-only directory\n")
+    os.chmod(os.path.join(root, "pub"), 0o311)
     os.symlink("hello.txt", os.path.join(root, "link-in"))
     os.mkfifo(os.path.join(root, "fifo"))
     return root
 
 
 def remove_site(base):
-    noread = os.path.join(base, "www", "noread.txt")
-    if os.path.exists(noread):
-        os.chmod(noread, 0o644)
+    root = os.path.join(base, "www")
+    for path, mode in ((root, 0o755), (os.path.join(root, "pub"), 0o755),
+                       (os.path.join(root, "noread.txt"), 0o644)):
+        if os.path.exists(path):
+            os.chmod(path, mode)
     shutil.rmtree(base, ignore_errors=True)
 
 
@@ -146,11 +153,14 @@ class SiteServerCase(object):
 
     idle = None
     server_args = ()
+    root_mode = None   # e.g. 0o311 for a search-only ROOT
 
     @classmethod
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="bhttp-test-")
         cls.root = make_site(cls.base)
+        if cls.root_mode is not None:
+            os.chmod(cls.root, cls.root_mode)
         cls.server = Server(cls.root, idle=cls.idle, args=cls.server_args).start()
 
     @classmethod

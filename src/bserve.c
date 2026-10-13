@@ -301,46 +301,6 @@ static int has_hidden_segment(const uint8_t *path, size_t len)
 }
 
 /*
- * Opens `rel`, a path relative to ROOT as realpath() produced it (no ".",
- * "..", empty or symlink components), one component at a time from the ROOT
- * descriptor, never following a symbolic link. If the tree changed after
- * realpath() looked at it (say, a directory was swapped for a symlink out of
- * ROOT), this fails instead of following the link, so whatever it opens is
- * inside ROOT. Returns a descriptor or -1 with errno set.
- */
-static int open_beneath(int root_fd, const char *rel)
-{
-    int dir = root_fd;
-
-    if (*rel == '\0')
-        return openat(root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    for (;;) {
-        const char *slash = strchr(rel, '/');
-        size_t len = slash ? (size_t)(slash - rel) : strlen(rel);
-        char name[PATH_MAX];
-        int fd = -1;
-        int saved;
-
-        if (len == 0 || len >= sizeof name) {
-            errno = ENOENT;
-        } else {
-            memcpy(name, rel, len);
-            name[len] = '\0';
-            fd = openat(dir, name, slash ? O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-                                         : O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-        }
-        saved = errno;
-        if (dir != root_fd)
-            close(dir);
-        errno = saved;
-        if (fd < 0 || slash == NULL)
-            return fd;
-        dir = fd;
-        rel = slash + 1;
-    }
-}
-
-/*
  * The status for a failed realpath() or open. EINVAL is what macOS realpath()
  * reports when a symlink it saw is replaced while it reads it: a race, so 404.
  */
@@ -355,22 +315,110 @@ static unsigned status_for_errno(int err)
 }
 
 /*
+ * Directories are opened for search only: looking a name up in a directory
+ * needs its x permission, not r, so a search-only (0311) directory still
+ * serves the files in it.
+ */
+#if defined(O_SEARCH)
+#define DIR_FLAGS (O_SEARCH | O_DIRECTORY)
+#elif defined(O_PATH)
+#define DIR_FLAGS (O_PATH | O_DIRECTORY)
+#else
+#define DIR_FLAGS (O_RDONLY | O_DIRECTORY)
+#endif
+
+/*
+ * Walks the directories of `rel`, a path relative to ROOT as realpath()
+ * produced it (no ".", "..", empty or symlink components), from the ROOT
+ * descriptor, never following a symbolic link. If the tree changed after
+ * realpath() looked at it (say, a directory was swapped for a link out of
+ * ROOT), the walk fails instead of following the link, so whatever it reaches
+ * is inside ROOT. Returns a descriptor for the directory that holds the last
+ * component, which is copied to `last`; or -1 with errno set.
+ */
+static int walk_beneath(int root_fd, const char *rel, char last[PATH_MAX])
+{
+    int dir = root_fd;
+
+    for (;;) {
+        const char *slash = strchr(rel, '/');
+        size_t len = slash ? (size_t)(slash - rel) : strlen(rel);
+        struct stat st;
+        int fd = -1;
+        int saved;
+
+        if (len == 0 || len >= PATH_MAX) {
+            errno = ENOENT;
+        } else {
+            memcpy(last, rel, len);
+            last[len] = '\0';
+            if (slash == NULL)
+                return dir;
+            fd = openat(dir, last, DIR_FLAGS | O_NOFOLLOW | O_CLOEXEC);
+            /* O_PATH would open a link itself: insist on a directory */
+            if (fd >= 0 && (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode))) {
+                close(fd);
+                fd = -1;
+                errno = ENOTDIR;
+            }
+        }
+        saved = errno;
+        if (dir != root_fd)
+            close(dir);
+        errno = saved;
+        if (fd < 0)
+            return -1;
+        dir = fd;
+        rel = slash + 1;
+    }
+}
+
+/*
+ * The last component, in the directory `dir` reached by walk_beneath(). Its
+ * type is checked without following a link; only a regular file is opened,
+ * again without following a link, and checked once more after the open.
+ */
+static unsigned open_last(int dir, const char *name, int trailing_slash, int *fd,
+                          struct stat *st)
+{
+    if (fstatat(dir, name, st, AT_SYMLINK_NOFOLLOW) != 0)
+        return status_for_errno(errno);
+    if (S_ISDIR(st->st_mode))
+        return trailing_slash ? 404 : 301;
+    if (!S_ISREG(st->st_mode))   /* FIFO, device, or a link swapped in */
+        return 404;
+    *fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (*fd < 0)
+        return status_for_errno(errno);
+    if (fstat(*fd, st) != 0 || !S_ISREG(st->st_mode)) {
+        close(*fd);
+        *fd = -1;
+        return 404;
+    }
+    return 0;
+}
+
+/*
  * Maps the path part of a request (no query) to an open regular file under
  * ROOT. Returns 0 with *fd, *st and `real` set, or the HTTP status to send.
  * The path has passed bh_path_check: it starts with '/', has no "." or ".."
  * segments and no NUL or other control bytes.
  *
  * realpath() resolves symlinks so that links inside ROOT work and links out
- * of ROOT are refused; open_beneath() then opens what realpath() named
- * without following anything, which closes the race between the two.
+ * of ROOT are refused; walk_beneath() and open_last() then open what
+ * realpath() named without following anything, which closes the race
+ * between the two.
  */
 static unsigned open_path(const struct config *cfg, const uint8_t *path, size_t len,
                           int *fd, struct stat *st, char real[PATH_MAX])
 {
     char want[PATH_MAX];
+    char last[PATH_MAX];
     const char *suffix = path[len - 1] == '/' ? "index.html" : "";
     size_t slen = strlen(suffix);
     const char *rel;
+    unsigned status;
+    int dir;
 
     if (has_hidden_segment(path, len))
         return 404;
@@ -387,16 +435,15 @@ static unsigned open_path(const struct config *cfg, const uint8_t *path, size_t 
     rel = real + cfg->root_len;
     if (*rel == '/')
         rel++;
-    *fd = open_beneath(cfg->root_fd, rel);
-    if (*fd < 0)
+    if (*rel == '\0')   /* ROOT itself, through a link inside it */
+        return slen > 0 ? 404 : 301;
+    dir = walk_beneath(cfg->root_fd, rel, last);
+    if (dir < 0)
         return status_for_errno(errno);
-    if (fstat(*fd, st) != 0 || !S_ISREG(st->st_mode)) {
-        unsigned status = S_ISDIR(st->st_mode) ? (slen > 0 ? 404 : 301) : 404;
-        close(*fd);
-        *fd = -1;
-        return status;
-    }
-    return 0;
+    status = open_last(dir, last, slen > 0, fd, st);
+    if (dir != cfg->root_fd)
+        close(dir);
+    return status;
 }
 
 static const char *content_type(const char *file)
@@ -1018,7 +1065,7 @@ int main(int argc, char **argv)
         return 1;
     }
     cfg.root_len = strlen(cfg.root);
-    cfg.root_fd = open(cfg.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    cfg.root_fd = open(cfg.root, DIR_FLAGS | O_CLOEXEC);
     if (cfg.root_fd < 0) {
         fprintf(stderr, "bserve: %s: %s\n", cfg.root, strerror(errno));
         return 1;

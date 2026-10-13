@@ -13,8 +13,12 @@ WARNINGS = -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wformat=2 \
            -Wstrict-prototypes -Wmissing-prototypes -Wvla
 FEATURES = -D_XOPEN_SOURCE=700
 ifeq ($(shell uname -s),Darwin)
-# macOS hides some POSIX 2008 names (O_NOFOLLOW) under strict _XOPEN_SOURCE
+# macOS hides some POSIX 2008 names (O_NOFOLLOW, O_SEARCH) under strict _XOPEN_SOURCE
 FEATURES += -D_DARWIN_C_SOURCE
+endif
+ifeq ($(shell uname -s),Linux)
+# for O_PATH: open a directory for search only (glibc has no O_SEARCH)
+FEATURES += -D_GNU_SOURCE
 endif
 BASE     = -std=c11 $(FEATURES) $(WARNINGS)
 RELEASE  = $(BASE) -O2
