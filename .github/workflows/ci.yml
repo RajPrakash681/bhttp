@@ -24,7 +24,7 @@ jobs:
         run: make CC=${{ matrix.cc }}
       - name: Unit and conformance tests (ASan + UBSan)
         run: make test CC=${{ matrix.cc }}
-      - name: Interop matrix against the independent Python pair
+      - name: Interop matrix against the Python client and server
         run: make interop CC=${{ matrix.cc }}
 
   spec:

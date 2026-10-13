@@ -24,7 +24,7 @@ programs in every pairing.
 `bcurl` share one C codec, a C-to-C test alone cannot tell a protocol from an
 implementation. So [interop/](interop/) adds a second client and server, written in Python
 from SPEC.md only, and cross-tests all four pairings (C↔C, C↔Python, Python↔C,
-Python↔Python): all 298 checks pass (300 with `--slow`), and CI runs them on every push.
+Python↔Python): all 308 checks pass (310 with `--slow`), and CI runs them on every push.
 
 ### The brief, line by line
 
@@ -47,9 +47,9 @@ Python↔Python): all 298 checks pass (300 with `--slow`), and CI runs them on e
 
 ### Evidence
 
-- `make test`: C unit tests for the codec and 77 conformance tests, run against
+- `make test`: C unit tests for the codec and 78 conformance tests, run against
   AddressSanitizer + UndefinedBehaviorSanitizer builds, on macOS (clang) and Linux (gcc).
-- `make interop`: the cross-implementation matrix, 298 checks (300 with `--slow`) ([interop/README.md](interop/README.md)).
+- `make interop`: the cross-implementation matrix, 308 checks (310 with `--slow`) ([interop/README.md](interop/README.md)).
 - [fuzz/](fuzz/): libFuzzer harnesses for every parser plus network fuzzers for both
   programs; about 400 million executions on 633e106 and 7ce6503, then a re-run on d98fb56
   of the targets the later fixes touched; no crash, sanitizer report or leak
@@ -82,19 +82,20 @@ exit 4
 ```
 
 ```text
-2026-10-13T06:11:56Z bserve: listening on 0.0.0.0:9000, root ./www, idle timeout 30s, max 64 connections
-2026-10-13T06:11:56Z 127.0.0.1:61667 connect
-2026-10-13T06:11:56Z 127.0.0.1:61667 GET /hello.txt 200 14
-2026-10-13T06:11:56Z 127.0.0.1:61667 close (peer closed, 1 request)
-2026-10-13T06:11:56Z 127.0.0.1:61669 connect
-2026-10-13T06:11:56Z 127.0.0.1:61669 GET / 200 542
-2026-10-13T06:11:56Z 127.0.0.1:61669 GET /missing.html 404 14
-2026-10-13T06:11:56Z 127.0.0.1:61669 GET /style.css 200 269
-2026-10-13T06:11:56Z 127.0.0.1:61669 close (peer closed, 3 requests)
+2026-10-13T06:49:23Z bserve: listening on 0.0.0.0:9000 and [::]:9000, root ./www, idle timeout 30s, max 64 connections
+2026-10-13T06:49:24Z [::1]:60549 connect
+2026-10-13T06:49:24Z [::1]:60549 GET /hello.txt 200 14
+2026-10-13T06:49:24Z [::1]:60549 close (peer closed, 1 request)
+2026-10-13T06:49:24Z [::1]:60550 connect
+2026-10-13T06:49:24Z [::1]:60550 GET / 200 542
+2026-10-13T06:49:24Z [::1]:60550 GET /missing.html 404 14
+2026-10-13T06:49:24Z [::1]:60550 GET /style.css 200 269
+2026-10-13T06:49:24Z [::1]:60550 close (peer closed, 3 requests)
 ```
 
 The second command fetched three URLs over one connection: one `connect`, three requests,
-one `close`. For the `-v` output, see [HEXDUMP.md](HEXDUMP.md).
+one `close`. (`localhost` resolved to `::1` on this machine, so the peer is logged as
+`[::1]`; an IPv4 client is logged as `127.0.0.1:port`.) For the `-v` output, see [HEXDUMP.md](HEXDUMP.md).
 
 ## Design summary
 
@@ -128,7 +129,8 @@ The spec is the reference; this is the map.
 bserve [-t idle_seconds] [-c max_connections] ROOT PORT
 ```
 
-- Listens on `0.0.0.0:PORT` with `SO_REUSEADDR`. `PORT` 0 picks a free port and the
+- Listens on every IPv4 and IPv6 address: one dual-stack socket (`IPV6_V6ONLY` off),
+  falling back to IPv4 only if IPv6 is unavailable, with `SO_REUSEADDR`. `PORT` 0 picks a free port and the
   first log line says which one (the tests use this).
 - **One process per connection (`fork`).** A connection's state (two 16 KiB frame
   buffers and a file descriptor) lives in its own address space, so one connection cannot
