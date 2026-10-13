@@ -1,5 +1,7 @@
 # bhttp: HTTP, in binary
 
+[![CI](https://github.com/RajPrakash681/bhttp/actions/workflows/ci.yml/badge.svg)](https://github.com/RajPrakash681/bhttp/actions/workflows/ci.yml)
+
 Two tracks, one protocol. `bserve` is a file server and `bcurl` is a client for
 **bhttp/1**, a binary request/response protocol with HTTP semantics: fixed 8-byte frame
 headers, a ten-name static header table, length-prefixed everything else, and one
@@ -9,8 +11,50 @@ second client and server written in Python from SPEC.md only, cross-tested again
 programs in every pairing.
 
 - **Author:** Raj Prakash
-- **Spec:** [SPEC.md](SPEC.md) (rendered: [SPEC.pdf](SPEC.pdf), two A4 pages)
-- **Annotated hexdump** of one real request and response: [HEXDUMP.md](HEXDUMP.md)
+
+## Hand-in
+
+| # | The brief asks for | Here |
+|---|---|---|
+| 1 | The spec: two pages, enough for a stranger | [SPEC.pdf](SPEC.pdf), exactly two A4 pages (source: [SPEC.md](SPEC.md)) |
+| 2 | Your program | [src/](src/): `make` builds `./bserve` (track 1, the server) and `./bcurl` (track 2, the client) |
+| 3 | An annotated hexdump of one complete request and response | [HEXDUMP.md](HEXDUMP.md): every byte labelled, plus an appendix with a skipped unknown frame and a GOAWAY |
+
+**Solo submission.** The brief is set for pairs; I wrote both tracks. Because `bserve` and
+`bcurl` share one C codec, a C-to-C test alone cannot tell a protocol from an
+implementation. So [interop/](interop/) adds a second client and server, written in Python
+from SPEC.md only, and cross-tests all four pairings (C↔C, C↔Python, Python↔C,
+Python↔Python): 298 of 298 checks pass, and CI runs them on every push.
+
+### The brief, line by line
+
+| The brief says | Spec | Checked by (in [tests/](tests/)) |
+|---|---|---|
+| accept a TCP connection, read one binary request frame | §2, §3, §5 | `test_get_index_200` |
+| map the path to a file under a root | §8 | `test_root_maps_to_index_html`, `test_traversal_and_bad_syntax_are_400`, `test_escapes_and_hidden_files_are_404`, `test_symlink_swap_never_escapes_the_root` |
+| reply: status, headers, the bytes | §5, §6 | `test_static_table_names_sent_indexed`, `test_large_file_multiple_data_frames` |
+| 404 if it is not there | §7 | `test_404` |
+| 400 if the frame is malformed | §7 | `test_malformed_payload_400_keeps_connection`, `test_oversized_length_is_400_and_close`, `test_http1_text_is_400_and_close` |
+| and keep the connection open | §2 | `test_three_requests_one_connection`, `test_many_requests_one_connection`, `test_pipelined_requests_answered_in_order` |
+| build the binary request frame | §5, §11 | `test_request_frames_follow_the_spec` |
+| read the response, body to stdout | §6, §11 | `test_body_to_stdout`, `test_large_body_is_reassembled` |
+| `-v` hexdumps every frame | §11 | `test_verbose_hexdumps_every_frame` |
+| exit non-zero on 4xx / 5xx | §11 | `test_404_exits_4`, `test_5xx_exits_5`, `test_worst_status_wins` |
+| and never open a second connection | §2, §11 | `test_multiple_urls_share_one_connection`, `test_never_opens_a_second_connection` |
+| a fixed-size frame header, widths defended; HTTP/2 chose 24 / 8 / 8 / 31, why? | §3 | `tests/unit_test.c` |
+| number the ten names you send, length-prefix the rest | §5 | `test_static_table_names_sent_indexed`, `test_literal_and_unknown_request_headers` |
+| a receiver meeting an unknown frame type MUST skip it | §4, §9 | `test_unknown_types_before_request_are_skipped`, `test_unknown_types_between_requests`, `test_unknown_frames_are_skipped`, `test_unknown_frames_between_responses_are_skipped` |
+
+### Evidence
+
+- `make test`: C unit tests for the codec and 77 conformance tests, run against
+  AddressSanitizer + UndefinedBehaviorSanitizer builds, on macOS (clang) and Linux (gcc).
+- `make interop`: the 298-check cross-implementation matrix ([interop/README.md](interop/README.md)).
+- [fuzz/](fuzz/): libFuzzer harnesses for every parser plus network fuzzers for both
+  programs; about 400 million executions with no crash, sanitizer report or leak
+  ([fuzz/README.md](fuzz/README.md)).
+- CI: `make`, `make test` and `make interop` on Ubuntu (gcc and clang) and macOS (clang),
+  plus a check that SPEC.pdf is at most two pages.
 
 Written in C11 with POSIX sockets only, no third-party libraries. Builds warning-free with
 `-Wall -Wextra -Werror` (plus `-Wpedantic -Wconversion -Wshadow` and friends) on Apple
