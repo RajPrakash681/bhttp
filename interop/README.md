@@ -11,16 +11,17 @@ settled.
 
 ## How it was written
 
-- **The first version.** The Python pair was written from `SPEC.md` (and `SPEC.pdf`, which
-  is rendered from it) before the C sources, `Makefile`, `tests/`, `HEXDUMP.md` or the
-  top-level README were read. The only input from the C side at that stage was the usage
-  text the two programs print: how to invoke them, and bcurl's exit codes, which SPEC.md
-  did not define yet.
-- **After the first cross-test.** That run passed every check it had. Then the C sources
-  were read, to find where the two sides differed.
+- **The first version.** The Python pair was written against `SPEC.md` only (and
+  `SPEC.pdf`, which is rendered from it), without consulting `src/`, the `Makefile`,
+  `tests/` or `HEXDUMP.md`. The one thing used from the C side was the usage text the two
+  programs print: how to invoke them, and bcurl's exit codes, which SPEC.md did not define
+  yet.
+- **After the first cross-test.** That run passed every check it had. From then on, `src/`
+  was consulted to find where the two sides differed.
 - **Each spec revision.** The spec was revised several times in answer to the questions
-  below (`3290045`, `2867662`, `6fdab1a`, `633e106`, `2f6c21e`, `cd6f0d2`, `b059295`). Each time, the Python pair
-  was changed to the new text, and the new rules were added to the matrix as graded rows.
+  below (`3290045`, `2867662`, `6fdab1a`, `633e106`, `2f6c21e`, `cd6f0d2`, `b059295`).
+  Each time, the Python pair was changed to the new text, and the new rules were added to
+  the matrix as graded rows.
 
 This describes the process; nothing in the repository can prove it. What the matrix does
 show is how the two pairs behave today: every client against every server, and each side
@@ -144,7 +145,13 @@ Each one turned the expected rows red.
 
 ## Results
 
-Final run (macOS, Apple Silicon, Python 3.9.6, against main at `b48b79a`): **308 checks without `--slow`, 310 with it, all passing.** CI runs the 308 on every push (`make interop`, Ubuntu with gcc and clang, and macOS).
+Final runs (macOS, Apple Silicon, Python 3.9.6, against main at `a9a4dfa`): **308 checks without `--slow`, 310 with it, all passing.** CI runs the 308 on every push (`make interop`, Ubuntu with gcc and clang, and macOS).
+
+```text
+$ python3 interop/run_interop.py
+...
+308 checks: 308 passed, 0 failed, 0 skipped
+```
 
 ```text
 $ python3 interop/run_interop.py --slow
