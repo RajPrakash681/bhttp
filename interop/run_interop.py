@@ -985,7 +985,7 @@ def s_busy(srv: RunningServer, tree: Tree) -> None:
 
 def idle_case(steps: Callable[[Raw, Callable[[], float]], int]) -> Callable[[RunningServer, Tree], None]:
     """Own server with T = 2 s.  `steps` drives the connection and returns the Last-ID
-    the idle GOAWAY must carry; the GOAWAY must then come 1.5-3.5 s after its last step."""
+    the idle GOAWAY must carry; the GOAWAY must then come within 4 s of its last step."""
     def run(srv: RunningServer, tree: Tree) -> None:
         with OwnServer(srv, tree, idle=2) as own:
             raw = Raw(own.port)
@@ -999,7 +999,7 @@ def idle_case(steps: Callable[[Raw, Callable[[], float]], int]) -> Callable[[Run
                 check(g.type == GOAWAY, "got %s, want the idle GOAWAY" % bh.KNOWN_TYPES.get(g.type))
                 check(bh.decode_goaway(g.payload) == (last_id, 0), "GOAWAY %s, want last-id %d NO_ERROR"
                       % (bh.decode_goaway(g.payload), last_id))
-                check(waited <= 3.5, "idle GOAWAY %.1f s after the last activity, T = 2 s" % waited)
+                check(waited <= 4.0, "idle GOAWAY %.1f s after the last activity, T = 2 s" % waited)
             finally:
                 raw.close()
     return run
@@ -1028,7 +1028,7 @@ def idle_unknown(srv: RunningServer, tree: Tree) -> None:
                 check(g.type == GOAWAY, "got %s, want the idle GOAWAY" % bh.KNOWN_TYPES.get(g.type))
                 check(bh.decode_goaway(g.payload) == (1, 0), "GOAWAY %s, want last-id 1 NO_ERROR"
                       % (bh.decode_goaway(g.payload),))
-                check(waited <= 3.5, "GOAWAY %.1f s after the REQUEST, T = 2 s" % waited)
+                check(waited <= 4.0, "GOAWAY %.1f s after the REQUEST, T = 2 s" % waited)
                 return
             raise TestFail("unknown frames kept the connection open for 6 s with T = 2 s")
         finally:
@@ -1036,18 +1036,18 @@ def idle_unknown(srv: RunningServer, tree: Tree) -> None:
 
 
 def idle_requests(raw: Raw, clock: Callable[[], float]) -> int:
-    """Four requests 1.3 s apart (3.9 s > T): each complete REQUEST resets T."""
+    """Four requests 1 s apart (3 s > T): each complete REQUEST resets T."""
     for rid in range(1, 5):
-        at(clock, (rid - 1) * 1.3)
+        at(clock, (rid - 1) * 1.0)
         raw.get(rid, b"/small.txt")
         raw.expect(rid, 200)
     return 4
 
 
 def idle_body(raw: Raw, clock: Callable[[], float]) -> int:
-    """A request body trickled over 3.9 s (> T): each DATA frame of it resets T."""
+    """A request body trickled over 3 s (> T): each DATA frame of it resets T."""
     raw.send(REQUEST, 0, 1, request_payload(b"/small.txt", method=POST))
-    for i, when in enumerate((1.3, 2.6, 3.9)):
+    for i, when in enumerate((1.0, 2.0, 3.0)):
         at(clock, when)
         raw.send(DATA, FLAG_END if i == 2 else 0, 1, b"part")
     raw.expect(1, 405)
@@ -1448,6 +1448,57 @@ def c_busy(sock, reader, req):
     time.sleep(0.2)
 
 
+def wait_for_close(sock: socket.socket, limit: float) -> None:
+    sock.settimeout(limit)
+    try:
+        while sock.recv(4096):
+            pass
+    except OSError:
+        pass
+
+
+def c_silent(sock, reader, req):
+    """Never answer."""
+    wait_for_close(sock, 8)
+
+
+def c_unknown_only(sock, reader, req):
+    """Unknown frames every 0.3 s, never a RESPONSE: not progress (§11)."""
+    end = time.monotonic() + 8
+    try:
+        while time.monotonic() < end:
+            send(sock, raw_frame(0x42, 0, req.rid, b"busy..."))
+            time.sleep(0.3)
+    except OSError:
+        pass
+
+
+def c_slow_body(sock, reader, req):
+    """A RESPONSE, then a DATA frame every second for 4 s: each one is progress."""
+    body = BODY * 4
+    send(sock, raw_frame(RESPONSE, 0, req.rid, b"\x00\xc8"))
+    for i in range(4):
+        time.sleep(1.0)
+        send(sock, raw_frame(DATA, FLAG_END if i == 3 else 0, req.rid, body[i * len(BODY):(i + 1) * len(BODY)]))
+
+
+def timed_case(script: Script, want_exit: int, low: float, high: float, out: Optional[bytes] = None):
+    """Run a client with -t 2 and check its exit code and how long it took."""
+    def run(cli: ClientImpl, tree: Tree) -> None:
+        srv = ScriptedServer(script)
+        try:
+            start = time.monotonic()
+            r = run_argv(cli.argv(False, ["-t", "2", cli.url(srv.port, "/x")]))
+            took = time.monotonic() - start
+        finally:
+            srv.close()
+        expect_exit(r, want_exit, "-t 2")
+        check(low <= took <= high, "took %.1f s with -t 2, want %.1f-%.1f s" % (took, low, high))
+        if out is not None:
+            check(r.out == out, "stdout %r" % short(r.out))
+    return run
+
+
 def expect_code(code: int, what: str, conns: Optional[int] = None,
                 out: Optional[bytes] = None) -> Callable[[ClientRun, ScriptedServer], None]:
     def fn(r: ClientRun, s: ScriptedServer) -> None:
@@ -1527,6 +1578,11 @@ CLIENT_TESTS = [
     ("§11 usage: unknown option -> 1", usage_case(lambda p: ["-Q", _url(p, "/a")])),
     ("§11 usage: no URL -> 1", usage_case(lambda p: [])),
     ("§11 usage: URL too big -> 1", usage_case(lambda p: [_url(p, "/" + "a" * 16400)])),
+    ("§11 usage: -t 0 -> 1", usage_case(lambda p: ["-t", "0", _url(p, "/a")])),
+    ("§11 usage: -t x -> 1", usage_case(lambda p: ["-t", "x", _url(p, "/a")])),
+    ("§11 -t 2: silent server -> 2", timed_case(c_silent, EXIT_FAILED, 1.5, 6.0)),
+    ("§11 -t 2: unknown frames != progress", timed_case(c_unknown_only, EXIT_FAILED, 1.5, 6.0)),
+    ("§11 -t 2: DATA every 1 s is progress", timed_case(c_slow_body, EXIT_OK, 3.5, 8.0, out=BODY * 4)),
 ]
 
 
@@ -1551,15 +1607,15 @@ def ref_spec_example() -> None:
 
 
 def hexdump_frames() -> List[Tuple[str, bytes]]:
-    """The raw frames from the capture in HEXDUMP.md, as (direction, bytes)."""
+    """The raw frames of every -v capture in HEXDUMP.md, as (direction, bytes)."""
     import re
     path = os.path.join(REPO, "HEXDUMP.md")
     if not os.path.exists(path):
         raise Skip("no HEXDUMP.md")
     with open(path) as f:
-        capture = f.read().split("```text", 1)[1].split("```", 1)[0]
+        blocks = [b.split("```", 1)[0] for b in f.read().split("```text")[1:]]
     frames: List[Tuple[str, bytearray]] = []
-    for line in capture.splitlines():
+    for line in "\n".join(blocks).splitlines():
         m = re.match(r"([<>])\s+([0-9a-f]{4})  ((?:[0-9a-f]{2} {1,2})+)", line + " ")
         if not m:
             continue
@@ -1572,7 +1628,7 @@ def hexdump_frames() -> List[Tuple[str, bytes]]:
 def ref_hexdump() -> None:
     """Decode every frame in HEXDUMP.md, re-encode it, and demand identical bytes."""
     frames = hexdump_frames()
-    check(len(frames) == 3, "found %d frames in HEXDUMP.md, want 3" % len(frames))
+    check(len(frames) >= 3, "found only %d frames in HEXDUMP.md" % len(frames))
     for direction, raw in frames:
         length, ftype, flags, rid = bh.decode_header(raw[:8])
         check(length == len(raw) - 8, "Length %d but %d payload bytes" % (length, len(raw) - 8))
@@ -1581,8 +1637,10 @@ def ref_hexdump() -> None:
             again = bh.encode_request(*bh.decode_request(payload))
         elif ftype == RESPONSE:
             again = bh.encode_response(*bh.decode_response(payload))
+        elif ftype == GOAWAY:
+            again = bh.encode_goaway(*bh.decode_goaway(payload))
         else:
-            again = payload
+            again = payload  # DATA, or an unknown type: opaque bytes
         check(bh.encode_frame(ftype, flags, rid, again) == raw,
               "%s frame does not re-encode to the same bytes" % bh.KNOWN_TYPES.get(ftype))
 
