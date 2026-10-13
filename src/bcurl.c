@@ -234,12 +234,15 @@ static int dial(const struct url *u)
 
 /* ---- one request ------------------------------------------------------ */
 
-static int send_request(struct client *c, const struct url *u, uint32_t id)
+/*
+ * Builds the REQUEST frame for u into frame (BH_FRAME_MAX bytes) and returns
+ * its header, or returns -1 if it does not fit in one frame.
+ */
+static int build_request(uint8_t *frame, const struct url *u, uint32_t id, struct bh_header *h)
 {
     struct bh_buf b;
-    struct bh_header h;
 
-    bh_buf_init(&b, c->tx + BH_HEADER_LEN, BH_MAX_PAYLOAD);
+    bh_buf_init(&b, frame + BH_HEADER_LEN, BH_MAX_PAYLOAD);
     bh_put_u8(&b, BH_GET);
     bh_put_u16(&b, (uint16_t)(u->slash + u->path_len));   /* parse_url checked the sum */
     bh_put_bytes(&b, "/", u->slash);
@@ -247,15 +250,24 @@ static int send_request(struct client *c, const struct url *u, uint32_t id)
     bh_put_field(&b, "host", u->authority);
     bh_put_field(&b, "user-agent", CLIENT_NAME);
     bh_put_field(&b, "accept", "*/*");
-    if (b.error) {
+    if (b.error)
+        return -1;
+    h->length = (uint16_t)b.len;
+    h->type = BH_REQUEST;
+    h->flags = BH_FLAG_END;
+    h->id = id;
+    bh_header_encode(h, frame);
+    return 0;
+}
+
+static int send_request(struct client *c, const struct url *u, uint32_t id)
+{
+    struct bh_header h;
+
+    if (build_request(c->tx, u, id, &h) != 0) {   /* main() checked this already */
         fprintf(stderr, "bcurl: %s: request does not fit in one frame\n", u->text);
         return -1;
     }
-    h.length = (uint16_t)b.len;
-    h.type = BH_REQUEST;
-    h.flags = BH_FLAG_END;
-    h.id = id;
-    bh_header_encode(&h, c->tx);
     if (c->verbose)
         bh_dump_frame(stderr, '>', c->tx);
     if (bh_send_frame(c->fd, c->tx, &h) != BH_IO_OK) {
@@ -469,6 +481,7 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    struct bh_header h;
     struct client *c;
     struct url *urls;
     int nurls;
@@ -507,6 +520,11 @@ int main(int argc, char **argv)
         } else if (i > 0 && !same_origin(&urls[0], &urls[i])) {
             fprintf(stderr, "bcurl: %s: every URL must use %s port %s (one connection)\n",
                     argv[optind + i], urls[0].host, urls[0].port);
+            result = EXIT_USAGE;
+        } else if (build_request(c->tx, &urls[i], (uint32_t)i + 1, &h) != 0) {
+            /* SPEC 11: detectable before connecting, so a usage error */
+            fprintf(stderr, "bcurl: %s: request does not fit in one %u-byte frame\n",
+                    argv[optind + i], BH_MAX_PAYLOAD);
             result = EXIT_USAGE;
         }
     }

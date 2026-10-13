@@ -167,10 +167,21 @@ class TestAgainstFakeServer(unittest.TestCase):
         paths = [w.parse_request(f.payload)[1] for f in seen]
         self.assertEqual(paths, [b"/?x=1", b"/", b"/a?b"])
 
-    def test_identical_content_length_copies_are_fine(self):
-        step = reply(200, b"ok", fields=[("content-length", "02")])
+    def test_content_length_copies_compare_as_bytes(self):
+        step = reply(200, b"ok", fields=[("content-length", "2")])   # reply adds another "2"
         with harness.FakeServer(scripted([step])) as fake:
             self.assertEqual(self.fetch(fake, "/"), (0, b"ok", ""))
+        step = reply(200, b"ok", fields=[("content-length", "02")])
+        with harness.FakeServer(scripted([step])) as fake:
+            self.assertEqual(self.fetch(fake, "/")[0], 2)
+
+    def test_oversized_request_is_a_usage_error(self):
+        with harness.FakeServer(scripted([reply(200, b"x")])) as fake:
+            rc, out, err = self.fetch(fake, "/ok", "/" + "a" * w.MAX_PAYLOAD)
+            time.sleep(0.2)
+            self.assertEqual(fake.accepted, 0)
+        self.assertEqual((rc, out), (1, b""))
+        self.assertIn("does not fit in one", err)
 
     def test_unknown_frames_are_skipped(self):
         def step(rid):
