@@ -17,7 +17,6 @@ Sections:
   2. Server conformance: hand-built frames sent straight to each server.
   3. Client conformance: each client against a scripted server that misbehaves
      in the ways SPEC.md §7 "Clients" lists.
-  4. Observations (no verdict): what each side does where SPEC.md is silent.
 """
 
 import argparse
@@ -65,7 +64,7 @@ def check(cond: bool, msg: str) -> None:
 
 class ServerImpl(NamedTuple):
     name: str
-    argv: Callable[..., List[str]]  # (root, port, idle_seconds=None)
+    argv: Callable[..., List[str]]  # (root, port, idle_seconds=None, max_connections=None)
 
 
 class ClientImpl(NamedTuple):
@@ -82,15 +81,17 @@ def _url(port: int, path: str) -> str:
     return "bhttp://%s:%d%s" % (HOST, port, path)
 
 
-def _idle(flag: str, idle: Optional[int]) -> List[str]:
-    return [flag, str(idle)] if idle else []
+def _opt(flag: str, value: Optional[int]) -> List[str]:
+    return [flag, str(value)] if value else []
 
 
 SERVERS = {
-    "C": ServerImpl("C", lambda root, port, idle=None:
-                    [os.path.join(REPO, "bserve")] + _idle("-t", idle) + [root, str(port)]),
-    "Py": ServerImpl("Py", lambda root, port, idle=None:
-                     [PY, os.path.join(HERE, "pybserve.py")] + _idle("--idle", idle) + [root, str(port)]),
+    "C": ServerImpl("C", lambda root, port, idle=None, cap=None:
+                    [os.path.join(REPO, "bserve")] + _opt("-t", idle) + _opt("-c", cap)
+                    + [root, str(port)]),
+    "Py": ServerImpl("Py", lambda root, port, idle=None, cap=None:
+                     [PY, os.path.join(HERE, "pybserve.py")] + _opt("--idle", idle) + _opt("-c", cap)
+                     + [root, str(port)]),
 }
 CLIENTS = {
     "C": ClientImpl("C", lambda v, urls: [os.path.join(REPO, "bcurl")] + (["-v"] if v else []) + urls,
@@ -224,10 +225,11 @@ def remove_tree(tree: Tree) -> None:
 
 class RunningServer:
     def __init__(self, impl: ServerImpl, root: str, logdir: str,
-                 idle: Optional[int] = None) -> None:
+                 idle: Optional[int] = None, cap: Optional[int] = None) -> None:
         self.impl = impl
         self.root = root
         self.idle = idle
+        self.cap = cap
         self.log_path = os.path.join(logdir, "server-%s.log" % impl.name)
         self.proc: Optional[subprocess.Popen] = None
         self.port = 0
@@ -236,7 +238,7 @@ class RunningServer:
     def start(self) -> None:
         self.port = free_port()
         log = open(self.log_path, "ab")
-        self.proc = subprocess.Popen(self.impl.argv(self.root, self.port, self.idle), stdout=log,
+        self.proc = subprocess.Popen(self.impl.argv(self.root, self.port, self.idle, self.cap), stdout=log,
                                      stderr=log, stdin=subprocess.DEVNULL)
         log.close()
         deadline = time.monotonic() + 10
@@ -539,6 +541,18 @@ def pair_verbose(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
     check(len(run.err) > 0, "-v wrote nothing to stderr")
 
 
+def pair_busy(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
+    """§2 BUSY: a client turned away at the cap fails with exit 2 and prints nothing."""
+    with OwnServer(srv, tree, cap=1) as own:
+        held = get_served(own.port, tree)
+        try:
+            run = run_client(cli, own.port, ["/small.txt"])
+        finally:
+            held.close()
+    expect_exit(run, EXIT_FAILED, "a server at its connection cap")
+    check(run.out == b"", "printed %r" % short(run.out))
+
+
 PAIR_TESTS = [
     ("200 small file, byte-exact", pair_small),
     ("404 -> §11 exit 4", pair_404),
@@ -550,6 +564,7 @@ PAIR_TESTS = [
     ("malformed req -> 400, kept", pair_bad_request),
     ("wrong response ID -> error", pair_wrong_id),
     ("connection refused exit", pair_refused),
+    ("server BUSY -> exit 2", pair_busy),
     ("-v keeps stdout clean", pair_verbose),
 ]
 
@@ -914,6 +929,141 @@ def s_content_types(raw: Raw, tree: Tree) -> None:
         check(got == [ctype], "%s: content-type %r, want %r" % (path.decode(), got, ctype))
 
 
+class OwnServer:
+    """A server of the same implementation with its own -t / -c, stopped on exit."""
+
+    def __init__(self, srv: RunningServer, tree: Tree, idle: Optional[int] = None,
+                 cap: Optional[int] = None) -> None:
+        self.server = RunningServer(srv.impl, tree.root, tree.base, idle=idle, cap=cap)
+
+    def __enter__(self) -> RunningServer:
+        self.server.start()
+        time.sleep(0.3)  # let the start-up probe connection be reaped before counting
+        return self.server
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.stop()
+
+
+def get_served(port: int, tree: Tree, within: float = 5.0) -> Raw:
+    """Open a connection that gets a 200 (retrying while the server says BUSY)."""
+    deadline = time.monotonic() + within
+    last = ""
+    while time.monotonic() < deadline:
+        raw = Raw(port)
+        try:
+            raw.get(1, b"/small.txt")
+            m = raw.expect(1, 200)
+            check(m.body == tree.files["/small.txt"], "wrong body")
+            return raw
+        except TestFail as exc:
+            last = str(exc)
+            raw.close()
+            time.sleep(0.2)
+    raise TestFail("no connection was served within %.0f s (%s)" % (within, last))
+
+
+def s_busy(srv: RunningServer, tree: Tree) -> None:
+    """§2: beyond the cap, GOAWAY Last-ID 0 code BUSY, then close; a freed slot is reused."""
+    with OwnServer(srv, tree, cap=2) as own:
+        held = [get_served(own.port, tree) for _ in range(2)]
+        try:
+            extra = Raw(own.port)
+            g = extra.frame()
+            check(g.type == GOAWAY, "third connection got %s, want GOAWAY" % bh.KNOWN_TYPES.get(g.type))
+            check(bh.decode_goaway(g.payload) == (0, bh.GOAWAY_BUSY), "GOAWAY %s, want last-id 0 BUSY"
+                  % (bh.decode_goaway(g.payload),))
+            extra.expect_eof(5.0)
+            extra.close()
+            held[0].close()
+            get_served(own.port, tree).close()  # the slot comes back
+            held[1].expect_still_open(tree)     # held connections are untouched
+        finally:
+            for raw in held:
+                raw.close()
+
+
+def idle_case(steps: Callable[[Raw, Callable[[], float]], int]) -> Callable[[RunningServer, Tree], None]:
+    """Own server with T = 2 s.  `steps` drives the connection and returns the Last-ID
+    the idle GOAWAY must carry; the GOAWAY must then come 1.5-3.5 s after its last step."""
+    def run(srv: RunningServer, tree: Tree) -> None:
+        with OwnServer(srv, tree, idle=2) as own:
+            raw = Raw(own.port)
+            try:
+                start = time.monotonic()
+                last_id = steps(raw, lambda: time.monotonic() - start)
+                quiet_from = time.monotonic()
+                raw.sock.settimeout(6)
+                g = raw.frame()
+                waited = time.monotonic() - quiet_from
+                check(g.type == GOAWAY, "got %s, want the idle GOAWAY" % bh.KNOWN_TYPES.get(g.type))
+                check(bh.decode_goaway(g.payload) == (last_id, 0), "GOAWAY %s, want last-id %d NO_ERROR"
+                      % (bh.decode_goaway(g.payload), last_id))
+                check(waited <= 3.5, "idle GOAWAY %.1f s after the last activity, T = 2 s" % waited)
+            finally:
+                raw.close()
+    return run
+
+
+def at(clock: Callable[[], float], when: float) -> None:
+    time.sleep(max(0.0, when - clock()))
+
+
+def idle_unknown(srv: RunningServer, tree: Tree) -> None:
+    """Unknown frames every 0.4 s don't keep a connection: GOAWAY T after the REQUEST."""
+    with OwnServer(srv, tree, idle=2) as own:
+        raw = Raw(own.port)
+        try:
+            raw.get(1, b"/small.txt")
+            raw.expect(1, 200)
+            answered = time.monotonic()
+            raw.sock.settimeout(0.4)
+            while time.monotonic() - answered < 6:
+                try:
+                    raw.send(0x42, 0, 0, b"still here")
+                    g = raw.frame()
+                except (OSError, TestFail):
+                    continue  # nothing yet
+                waited = time.monotonic() - answered
+                check(g.type == GOAWAY, "got %s, want the idle GOAWAY" % bh.KNOWN_TYPES.get(g.type))
+                check(bh.decode_goaway(g.payload) == (1, 0), "GOAWAY %s, want last-id 1 NO_ERROR"
+                      % (bh.decode_goaway(g.payload),))
+                check(waited <= 3.5, "GOAWAY %.1f s after the REQUEST, T = 2 s" % waited)
+                return
+            raise TestFail("unknown frames kept the connection open for 6 s with T = 2 s")
+        finally:
+            raw.close()
+
+
+def idle_requests(raw: Raw, clock: Callable[[], float]) -> int:
+    """Four requests 1.3 s apart (3.9 s > T): each complete REQUEST resets T."""
+    for rid in range(1, 5):
+        at(clock, (rid - 1) * 1.3)
+        raw.get(rid, b"/small.txt")
+        raw.expect(rid, 200)
+    return 4
+
+
+def idle_body(raw: Raw, clock: Callable[[], float]) -> int:
+    """A request body trickled over 3.9 s (> T): each DATA frame of it resets T."""
+    raw.send(REQUEST, 0, 1, request_payload(b"/small.txt", method=POST))
+    for i, when in enumerate((1.3, 2.6, 3.9)):
+        at(clock, when)
+        raw.send(DATA, FLAG_END if i == 2 else 0, 1, b"part")
+    raw.expect(1, 405)
+    return 1
+
+
+def s_head_error(payload: bytes) -> Callable[[Raw, Tree], None]:
+    """§6: a 400 to a REQUEST whose Method byte is HEAD has END and no DATA too."""
+    def fn(raw: Raw, tree: Tree) -> None:
+        raw.send(REQUEST, FLAG_END, 1, payload)
+        m = raw.expect(1, 400)
+        check(bool(m.flags & FLAG_END) and not m.data_sizes, "400 to HEAD has DATA")
+        raw.expect_still_open(tree)
+    return fn
+
+
 def s_idle_trickle(srv: RunningServer, tree: Tree) -> None:
     """§2: bytes of a partial frame do not extend T (own server with T = 3 s)."""
     own = RunningServer(srv.impl, tree.root, tree.base, idle=3)
@@ -989,6 +1139,7 @@ SERVER_TESTS = [
     ("req c-l 3 = body -> 200", srv_case(s_cl_body([b"3"], b"abc", 200))),
     ("req c-l 007 = body -> 200", srv_case(s_cl_body([b"007"], b"abcdefg", 200))),
     ("req c-l 3,3 = body -> 200", srv_case(s_cl_body([b"3", b"3"], b"abc", 200))),
+    ("req c-l copies 3,03 -> 400", srv_case(s_cl_body([b"3", b"03"], b"abc", 400))),
     ("unknown frames skipped", srv_case(s_unknown_frames)),
     ("IDs copied (0xffffffff,5,3)", srv_case(s_ids_copied)),
     ("unused flag bits ignored", srv_case(s_flag_bits)),
@@ -997,6 +1148,8 @@ SERVER_TESTS = [
     ("HEAD: END, no DATA, c-l", srv_case(s_head)),
     ("HEAD 404: END, no DATA", srv_case(s_head_status(b"/nope", 404))),
     ("HEAD 301: END, no DATA", srv_case(s_head_status(b"/sub", 301))),
+    ("HEAD bad path: 400, no DATA", srv_case(s_head_error(request_payload(b"/a/../b", method=HEAD)))),
+    ("HEAD bad c-l: 400, no DATA", srv_case(s_head_error(request_payload(b"/small.txt", method=HEAD, headers=cl(b"5"))))),
     ("date, last-modified IMF-fixdate", srv_case(s_dates)),
     ("content-type per §8 table", srv_case(s_content_types)),
     ("POST + body -> 405, allow", srv_case(s_405)),
@@ -1019,6 +1172,10 @@ SERVER_TESTS = [
     ("client GOAWAY -> close", srv_case(s_client_goaway)),
     ("GOAWAY ID 7 ignored -> close", srv_case(s_client_goaway_id)),
     ("partial frame doesn't extend T", s_idle_trickle),
+    ("unknown frames don't extend T", idle_unknown),
+    ("each REQUEST resets T", idle_case(idle_requests)),
+    ("each body DATA resets T", idle_case(idle_body)),
+    ("cap 2: 3rd gets GOAWAY BUSY", s_busy),
 ]
 SLOW_SERVER_TESTS = [("idle close with GOAWAY 0x00", srv_case(s_idle))]
 
@@ -1065,7 +1222,7 @@ class ScriptedServer:
         reader = bh.FrameReader(sock)
         try:
             while True:
-                f = reader.read(10)
+                f = reader.read(time.monotonic() + 10)
                 if f is None:
                     break
                 if f.type == REQUEST:
@@ -1285,6 +1442,12 @@ def c_close_after_first(sock, reader, req):
     raise ConnectionAbortedError("scripted close")  # ends this connection
 
 
+def c_busy(sock, reader, req):
+    send(sock, raw_frame(GOAWAY, 0, 0, bh.encode_goaway(0, bh.GOAWAY_BUSY)))
+    sock.shutdown(socket.SHUT_WR)
+    time.sleep(0.2)
+
+
 def expect_code(code: int, what: str, conns: Optional[int] = None,
                 out: Optional[bytes] = None) -> Callable[[ClientRun, ScriptedServer], None]:
     def fn(r: ClientRun, s: ScriptedServer) -> None:
@@ -1342,6 +1505,8 @@ CLIENT_TESTS = [
     ("c-l empty -> 2", scripted(c_lengths([b""], b""))),
     ("c-l 007 = 7 bytes -> 0", scripted(c_lengths([b"007"], b"1234567"), None, expect_body(b"1234567"))),
     ("c-l 2,2 = 2 bytes -> 0", scripted(c_lengths([b"2", b"2"], b"ab"), None, expect_body(b"ab"))),
+    ("c-l copies 2,02 -> 2", scripted(c_lengths([b"2", b"02"], b"ab"))),
+    ("GOAWAY BUSY -> 2, no output", scripted(c_busy, ["/a", "/b"], expect_code(EXIT_FAILED, "GOAWAY BUSY", out=b""))),
     ("§11 exit: 301 -> 0", scripted(c_statuses(301), ["/a"], expect_code(EXIT_OK, "a 301"))),
     ("§11 exit: 500 -> 5", scripted(c_statuses(500), ["/a"], expect_code(EXIT_5XX, "a 500"))),
     ("§11 exit: 200,404 -> 4", scripted(c_statuses(200, 404), ["/a", "/b"], expect_code(EXIT_4XX, "200 then 404"))),
@@ -1361,6 +1526,7 @@ CLIENT_TESTS = [
     ("§11 usage: bad port -> 1", usage_case(lambda p: ["%s:%dx/a" % (HOST, p)])),
     ("§11 usage: unknown option -> 1", usage_case(lambda p: ["-Q", _url(p, "/a")])),
     ("§11 usage: no URL -> 1", usage_case(lambda p: [])),
+    ("§11 usage: URL too big -> 1", usage_case(lambda p: [_url(p, "/" + "a" * 16400)])),
 ]
 
 
@@ -1426,87 +1592,6 @@ REF_TESTS = [
     ("SPEC.md §10 example", ref_spec_example),
     ("HEXDUMP.md decodes+re-encodes", ref_hexdump),
 ]
-
-
-# ---------------------------------------------------------------------------
-# 4. Observed behaviour where SPEC.md is silent (no verdict, just the facts)
-# ---------------------------------------------------------------------------
-
-def obs_client(script: Script, path: str, url: Optional[Callable[[int], str]] = None,
-               report: str = "exit") -> Callable[[ClientImpl], str]:
-    def fn(cli: ClientImpl) -> str:
-        srv = ScriptedServer(script)
-        try:
-            argv = cli.argv(False, [url(srv.port) if url else cli.url(srv.port, path)])
-            p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=CLIENT_TIMEOUT)
-        finally:
-            srv.close()
-        if report == "path":
-            if not srv.requests:
-                return "not sent (exit %d)" % p.returncode
-            payload = srv.requests[0].payload  # raw: the path may be one a server rejects
-            (plen,) = struct.unpack_from("!H", payload, 1)
-            return repr(payload[3:3 + plen].decode("latin-1"))
-        return "exit %d" % p.returncode
-    return fn
-
-
-def obs_head_error(payload: bytes) -> Callable[[RunningServer], str]:
-    """Shape of a 400 answering a HEAD-coded REQUEST: END only, or a body in DATA?"""
-    def fn(srv: RunningServer) -> str:
-        raw = Raw(srv.port)
-        try:
-            raw.send(REQUEST, FLAG_END, 1, payload)
-            m = raw.message()
-        finally:
-            raw.close()
-        return "%d %s" % (m.status, "END, no DATA" if m.flags & FLAG_END else "+ %d B DATA" % len(m.body))
-    return fn
-
-
-def obs_cl_copies(values: List[bytes], body: bytes) -> Callable[[RunningServer], str]:
-    def fn(srv: RunningServer) -> str:
-        raw = Raw(srv.port)
-        try:
-            raw.send(REQUEST, 0, 1, request_payload(b"/small.txt", headers=cl(*values)))
-            raw.send(DATA, FLAG_END, 1, body)
-            return str(raw.message().status)
-        finally:
-            raw.close()
-    return fn
-
-
-OBS_SERVER = [
-    ("HEAD /a/../b (bad path)", obs_head_error(request_payload(b"/a/../b", method=HEAD))),
-    ("HEAD with c-l 5, no body", obs_head_error(request_payload(b"/small.txt", method=HEAD, headers=cl(b"5")))),
-    ("req c-l copies 3, 03 (3 B)", obs_cl_copies([b"3", b"03"], b"abc")),
-]
-OBS_CLIENT = [
-    ("URL too long for one frame", obs_client(c_good, "/" + "a" * 16400)),
-    ("resp c-l copies 2, 02 (2 B)", obs_client(c_lengths([b"2", b"02"], b"ab"), "/x")),
-]
-
-
-def observe(fn: Callable[[], str]) -> str:
-    try:
-        return fn()
-    except Exception as exc:
-        return "error: %s" % exc
-
-
-OBS_TITLE = "4. Observed behaviour where SPEC.md is silent or ambiguous (not graded)"
-
-
-def print_observations(rows: List[Tuple[str, Dict[str, str]]], columns: List[str]) -> None:
-    rows = [(t, v) for t, v in rows if any(c in v for c in columns)]
-    if not rows:
-        return
-    width = max(len(t) for t, _ in rows) + 2
-    colw = max([len(v) for _, vals in rows for v in vals.values()] + [len(c) for c in columns]) + 2
-    print("%-*s%s" % (width, "probe", "".join("%-*s" % (colw, c) for c in columns)))
-    for test, vals in rows:
-        print("%-*s%s" % (width, test, "".join("%-*s" % (colw, vals.get(c, "-")) for c in columns)))
 
 
 # ---------------------------------------------------------------------------
@@ -1580,7 +1665,6 @@ def main() -> int:
     tree = make_tree()
     servers = {name: RunningServer(SERVERS[name], tree.root, tree.base) for name in impls}
     results: List[Result] = []
-    observations: List[Tuple[str, Dict[str, str]]] = []
     for test, ref in REF_TESTS:
         verdict, detail = attempt(ref)
         results.append(Result(REF_SECTION, test, "Py", verdict, detail))
@@ -1609,12 +1693,6 @@ def main() -> int:
                 verdict, detail = attempt(lambda: fn(CLIENTS[c], tree))
                 results.append(Result(sec, test, c, verdict, detail))
 
-        for test, probe in OBS_SERVER:
-            observations.append((test, {"%s server" % s: observe(lambda: probe(servers[s]))
-                                        for s in impls}))
-        for test, probe in OBS_CLIENT:
-            observations.append((test, {"%s client" % c: observe(lambda: probe(CLIENTS[c]))
-                                        for c in impls}))
     finally:
         for s in servers.values():
             s.stop()
@@ -1628,10 +1706,6 @@ def main() -> int:
     print_table(results, "1. Pairing matrix (client -> server)", pairs)
     print_table(results, "2. Server conformance (raw frames)", impls)
     print_table(results, "3. Client conformance (scripted server)", impls)
-    print("\n" + OBS_TITLE + "\n" + "-" * len(OBS_TITLE))
-    print_observations(observations, ["%s server" % s for s in impls])
-    print()
-    print_observations(observations, ["%s client" % c for c in impls])
 
     failed = [r for r in results if r.verdict == "FAIL"]
     skipped = [r for r in results if r.verdict == "SKIP"]
