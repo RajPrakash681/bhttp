@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Interop matrix for bhttp/1: the C pair (bserve, bcurl) against the
-independent Python pair (pybserve, pybcurl), plus raw-frame conformance checks.
+Python pair written from SPEC.md (pybserve, pybcurl), plus raw-frame conformance checks.
 
     python3 interop/run_interop.py [--slow] [--only C|Py] [--keep]
 

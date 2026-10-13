@@ -1,4 +1,4 @@
-"""bhttp/1 frame and payload codec, written from SPEC.md alone.
+"""bhttp/1 frame and payload codec, written from SPEC.md.
 
 Everything here is pure encoding/decoding plus a small blocking frame reader.
 Section numbers in comments refer to SPEC.md.
