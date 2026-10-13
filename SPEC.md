@@ -20,8 +20,8 @@ client's first bytes are its first frame.
 - **The client closes** when it is done (the normal end); it MAY send GOAWAY first.
 - **The server closes** (a) after a connection error (§7); (b) when idle: no complete
   REQUEST within T seconds of accepting the connection or finishing the previous response
-  (inside a request body: of the body's last DATA frame); other frames and partial frames
-  do not extend T, which SHOULD be at least 10 s; (c) to refuse a connection it cannot
+  (inside a request body: no DATA frame of it within T of its previous frame); other
+  frames and partial frames do not extend T, which SHOULD be at least 10 s; (c) to refuse a connection it cannot
   take, with GOAWAY Last-ID 0, Code `0x02` BUSY; the client MAY retry later.
 - A server closing on its own initiative SHOULD send GOAWAY, then shut down its sending
   side and read and discard input for up to 2 s, so the peer reads the GOAWAY rather than
@@ -130,8 +130,8 @@ MUST NOT require any header. The block must fit in its one frame.
 **Payload widths.** A byte suffices for Method, Index and NLen (5 methods, 10 names,
 names ≤ 255 bytes); Path Length, VLen and Status take 16 bits (long paths and values;
 599 > 255). As in HPACK the static table is 1-based and Index 0 means "a literal name
-follows"; unlike HPACK, integers are fixed-width (no prefix-varints) and there is no
-Huffman coding or dynamic table, which save bytes but need a stateful decoder.
+follows"; unlike HPACK, integers are fixed-width (no prefix-varints), with no Huffman
+coding or dynamic table: they save bytes but need a stateful decoder.
 
 ## 6. Messages and bodies
 
@@ -196,8 +196,8 @@ No version number is sent; the frame header and the MUST-skip rule are frozen fo
 version. A later version may add frame types (`0x05`–`0x7f`), flag bits, GOAWAY codes and
 bytes, and frames up to Length 65535, but uses them only once the peer has shown it
 understands them: a v2 peer announces itself with a new frame type (say, HELLO) that a v1
-peer silently skips. A v1 server never sends one, so a v2 client that gets a RESPONSE
-without it stays at v1.
+peer skips; a v1 server never sends one, so a v2 client that sees a RESPONSE first stays
+at v1.
 
 ## 10. Worked example
 
@@ -211,7 +211,7 @@ GET `/` with no headers, ID 1, answered by a 404 with no body:
 ```
 
 `01 00 0e` `localhost:9000` is `host: localhost:9000`; `00 03` `x-a` `00 01` `1` is the
-literal `x-a: 1`. HEXDUMP.md annotates a full exchange. One connection, frame by frame:
+literal `x-a: 1` (HEXDUMP.md annotates a full exchange). One connection:
 
 ```
 C>S  REQUEST  id=1 END   GET /a.bin
@@ -233,9 +233,9 @@ IPv4 address or `[IPv6]`, port 9000 by default. The host ends at the first `:` `
 or `#`; a `#fragment` is not sent; an empty path is `/`, and `?q` is `/?q`. All URLs share
 one host and port and go in order over one connection, never reopened. bcurl gives up
 after `-t` seconds (30) without a RESPONSE or DATA frame of the current request. Exit: 0
-all 2xx/3xx; 4 worst 4xx; 5 worst 5xx; 2 connection or protocol error or timeout (later
-URLs skipped); 1 usage error, including a REQUEST too big for one frame (nothing sent).
-The worst wins: 2, 5, 4, 0.
+all 2xx/3xx; 4 or 5 if the worst was 4xx or 5xx; 2 connection or protocol error or
+timeout (later URLs skipped); 1 usage error, including a REQUEST too big for one frame
+(nothing sent); the worst wins (2, 5, 4, 0).
 
 ## 12. Conformance checklist
 
@@ -244,6 +244,5 @@ The worst wins: 2, 5, 4, 0.
   END; `content-length` checked.
 - [ ] Client: IDs 1, 2, 3, …; one request at a time; every RESPONSE and DATA ID checked;
   protocol errors (§7) end the connection.
-- [ ] Server: IDs copied; request errors: 400, connection kept; connection errors: 400 on
-  ID 0, GOAWAY `0x01`, close; bodies read through END; §5.1 and §8 path rules; idle close
-  with GOAWAY `0x00`.
+- [ ] Server: IDs copied; request errors: 400, kept open; connection errors: 400 on ID 0,
+  GOAWAY `0x01`, close; bodies read through END; §5.1/§8 path rules; idle GOAWAY `0x00`.
