@@ -276,25 +276,29 @@ int bh_content_length(const uint8_t *fields, size_t len, int *present, uint64_t 
     static const char name[] = "content-length";
     struct bh_fields it;
     struct bh_field f;
+    const uint8_t *first = NULL;
+    size_t first_len = 0;
     const char *ignored = NULL;
 
     *present = 0;
     *value = 0;
     bh_fields_init(&it, fields, len);
     while (bh_fields_next(&it, &f, &ignored) == 1) {
-        uint64_t v;
         if (f.name_len != sizeof name - 1 || memcmp(f.name, name, sizeof name - 1) != 0)
             continue;
-        if (bh_parse_decimal(f.value, f.value_len, &v) != 0) {
-            *err = "content-length is not 1-19 ASCII digits";
+        if (first == NULL) {
+            if (bh_parse_decimal(f.value, f.value_len, value) != 0) {
+                *err = "content-length is not 1-19 ASCII digits";
+                return -1;
+            }
+            first = f.value;
+            first_len = f.value_len;
+            *present = 1;
+        } else if (f.value_len != first_len || memcmp(f.value, first, first_len) != 0) {
+            /* SPEC 6: copies must be byte-for-byte identical ("3" and "03" are not) */
+            *err = "content-length copies are not identical";
             return -1;
         }
-        if (*present && v != *value) {
-            *err = "conflicting content-length values";
-            return -1;
-        }
-        *present = 1;
-        *value = v;
     }
     return 0;
 }

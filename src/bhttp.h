@@ -132,9 +132,9 @@ struct bh_goaway {
 void bh_goaway_parse(const uint8_t *p, size_t n, struct bh_goaway *g);
 
 /*
- * SPEC 6: content-length in a well-formed header block. Every copy must be
- * 1..19 ASCII digits and all copies equal. Returns 0 with *present (0 or 1)
- * and *value set, or -1 with *err.
+ * SPEC 6: content-length in a well-formed header block. It must be 1..19
+ * ASCII digits, and any further copies must be byte-for-byte identical to the
+ * first. Returns 0 with *present (0 or 1) and *value set, or -1 with *err.
  */
 int bh_content_length(const uint8_t *fields, size_t len, int *present, uint64_t *value,
                       const char **err);

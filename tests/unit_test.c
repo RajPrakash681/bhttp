@@ -221,8 +221,11 @@ static void test_content_length(void)
 
     CHECK(clen(NULL, 0, &present, &v) == 0 && present == 0 && v == 0);
     CHECK(clen(BYTES(0x05, 0x00, 0x02, '1', '4'), 5, &present, &v) == 0 && present && v == 14);
-    CHECK(clen(BYTES(0x05, 0x00, 0x01, '7', 0x05, 0x00, 0x02, '0', '7'), 9, &present, &v) == 0);
+    CHECK(clen(BYTES(0x05, 0x00, 0x01, '7', 0x05, 0x00, 0x01, '7'), 8, &present, &v) == 0);
     CHECK(present && v == 7);
+    CHECK(clen(BYTES(0x05, 0x00, 0x02, '0', '7'), 5, &present, &v) == 0 && v == 7);
+    /* copies compare as bytes: "7" and "07" are the same number but not identical */
+    CHECK(clen(BYTES(0x05, 0x00, 0x01, '7', 0x05, 0x00, 0x02, '0', '7'), 9, &present, &v) != 0);
     CHECK(clen(BYTES(0x05, 0x00, 0x01, '7', 0x05, 0x00, 0x01, '8'), 8, &present, &v) != 0);
     CHECK(clen(BYTES(0x05, 0x00, 0x00), 3, &present, &v) != 0);
     CHECK(clen(BYTES(0x05, 0x00, 0x02, '1', 'x'), 5, &present, &v) != 0);
