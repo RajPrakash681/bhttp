@@ -17,12 +17,12 @@ const pdfPath = path.join(repo, 'SPEC.pdf');
 const htmlPath = path.join(repo, 'SPEC.html');
 
 const css = `
-@page { size: A4; margin: 7mm 8mm 7mm 8mm; }
+@page { size: A4; margin: 12mm; }
 * { box-sizing: border-box; }
 html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-body { margin: 0; font: 9pt/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+body { margin: 0; font: 9pt/1.3 "Helvetica Neue", Helvetica, Arial, sans-serif;
        color: #111; background: #fff; }
-.cols { column-count: 2; column-gap: 5mm; column-fill: auto; }
+.cols { column-count: 2; column-gap: 6mm; column-fill: auto; }
 h1 { font-size: 13pt; margin: 0 0 0.6mm; }
 h1 + p { margin: 0 0 1.4mm; color: #333; }
 h2 { font-size: 10pt; margin: 1.5mm 0 0.5mm; break-after: avoid; }
@@ -34,10 +34,10 @@ ul:has(> li > input) { list-style: none; padding-left: 0; }
 /* identifiers never hyphenate or wrap, so they copy and search intact */
 code { font: 8.3pt/1.2 Menlo, "DejaVu Sans Mono", monospace; background: #f1f1f1;
        padding: 0 0.3mm; border-radius: 1px; hyphens: none; white-space: nowrap; }
-pre { margin: 0.5mm 0 1.2mm; padding: 1mm 1.4mm; background: #f4f4f4;
+pre { margin: 0.5mm 0 1.2mm; padding: 1mm 1.2mm; background: #f4f4f4;
       border-left: 0.6mm solid #999; break-inside: avoid; overflow: hidden; }
 code.long { white-space: normal; }   /* long spans may wrap at their spaces */
-pre code { font-size: 7.6pt; background: none; padding: 0; white-space: pre; }
+pre code { font-size: 7.2pt; background: none; padding: 0; white-space: pre; }
 table { border-collapse: collapse; width: 100%; margin: 0.5mm 0 1.4mm; }
 table.wide { column-span: all; margin: 0.6mm 0 1.6mm; }
 th, td { border: 0.2mm solid #bbb; padding: 0.3mm 0.9mm; vertical-align: top;
