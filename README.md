@@ -34,15 +34,15 @@ exit 4
 ```
 
 ```text
-2026-10-08T12:10:39Z bserve: listening on 0.0.0.0:9000, root /Users/rajprakash/devops-work/bhttp/www, idle timeout 30s
-2026-10-08T12:10:40Z 127.0.0.1:49383 connect
-2026-10-08T12:10:40Z 127.0.0.1:49383 GET /hello.txt 200 14
-2026-10-08T12:10:40Z 127.0.0.1:49383 close (peer closed, 1 request)
-2026-10-08T12:10:40Z 127.0.0.1:49385 connect
-2026-10-08T12:10:40Z 127.0.0.1:49385 GET / 200 542
-2026-10-08T12:10:40Z 127.0.0.1:49385 GET /missing.html 404 14
-2026-10-08T12:10:40Z 127.0.0.1:49385 GET /style.css 200 269
-2026-10-08T12:10:40Z 127.0.0.1:49385 close (peer closed, 3 requests)
+2026-10-13T05:52:55Z bserve: listening on 0.0.0.0:9000, root /Users/rajprakash/devops-work/bhttp/www, idle timeout 30s, max 64 connections
+2026-10-13T05:52:55Z 127.0.0.1:65071 connect
+2026-10-13T05:52:55Z 127.0.0.1:65071 GET /hello.txt 200 14
+2026-10-13T05:52:55Z 127.0.0.1:65071 close (peer closed, 1 request)
+2026-10-13T05:52:55Z 127.0.0.1:65073 connect
+2026-10-13T05:52:55Z 127.0.0.1:65073 GET / 200 542
+2026-10-13T05:52:55Z 127.0.0.1:65073 GET /missing.html 404 14
+2026-10-13T05:52:55Z 127.0.0.1:65073 GET /style.css 200 269
+2026-10-13T05:52:55Z 127.0.0.1:65073 close (peer closed, 3 requests)
 ```
 
 The second command fetched three URLs over one connection: one `connect`, three requests,
