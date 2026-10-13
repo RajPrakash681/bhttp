@@ -1,7 +1,7 @@
 /*
  * bserve - serve files from a directory over bhttp/1.
  *
- *     bserve [-t idle_seconds] ROOT PORT
+ *     bserve [-t idle_seconds] [-c max_connections] ROOT PORT
  *
  * Listens on 0.0.0.0:PORT (0 picks a free port; the log line says which) and
  * forks one process per connection. Each process reads frames until the peer
@@ -761,36 +761,88 @@ static int handle_connection(const struct config *cfg, int fd, const struct sock
     return 0;
 }
 
-/* ---- capacity --------------------------------------------------------- */
+/* ---- the listener ---------------------------------------------------- */
+
+#define MAX_REFUSING 64   /* refused connections lingering at once */
 
 /*
- * Turns a connection away from the listening process: GOAWAY with code BUSY
- * and Last-ID 0 (nothing was processed), then close. The listener must never
- * wait on a client, so the socket is made non-blocking first; whatever input
- * is already there is drained so that the close does not reset the GOAWAY.
+ * The listening process. It never blocks on a client: accepted connections
+ * go to a child process, and connections it refuses (SPEC 2: GOAWAY BUSY)
+ * wait here, non-blocking, while their input is drained, until the peer
+ * closes or LINGER_MS pass. Closing at once could reset a REQUEST that was
+ * already on its way, and the reset could destroy the GOAWAY.
  */
-static void refuse(int fd, const struct sockaddr_storage *ss, const char *reason)
+struct listener {
+    int fd;
+    unsigned long max_conns;
+    unsigned long live;   /* connection processes not yet reaped */
+    struct {
+        int fd;
+        int64_t deadline;
+    } refusing[MAX_REFUSING];
+    size_t nrefusing;
+};
+
+static void set_blocking(int fd, int blocking)
+{
+    int flags = fcntl(fd, F_GETFL);
+
+    if (flags >= 0)
+        (void)fcntl(fd, F_SETFL, blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK);
+}
+
+static void drop_refusal(struct listener *l, size_t i)
+{
+    close(l->refusing[i].fd);
+    l->refusing[i] = l->refusing[--l->nrefusing];
+}
+
+/* Turns a connection away: GOAWAY BUSY with Last-ID 0, then linger. */
+static void refuse(struct listener *l, int fd, const struct sockaddr_storage *ss,
+                   const char *reason)
 {
     uint8_t frame[BH_HEADER_LEN + 5];
-    uint8_t sink[4096];
     struct bh_header h = { 5, BH_GOAWAY, 0, 0 };
     char peer[INET6_ADDRSTRLEN + 8];
-    int flags = fcntl(fd, F_GETFL);
-    size_t drained = 0;
-    ssize_t r;
 
-    memset(frame, 0, sizeof frame);   /* Last-ID 0 */
+    memset(frame, 0, sizeof frame);   /* Last-ID 0: nothing was processed */
     frame[BH_HEADER_LEN + 4] = BH_BUSY;
     bh_header_encode(&h, frame);
-    if (flags >= 0)
-        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    (void)send(fd, frame, sizeof frame, 0);
-    while (drained < sizeof sink * 16 && (r = recv(fd, sink, sizeof sink, 0)) > 0)
-        drained += (size_t)r;
+    set_blocking(fd, 0);
+    (void)send(fd, frame, sizeof frame, 0);   /* 13 bytes into an empty buffer */
     (void)shutdown(fd, SHUT_WR);
-    close(fd);
+    if (l->nrefusing == MAX_REFUSING) {   /* full: the oldest goes first */
+        size_t oldest = 0;
+        for (size_t i = 1; i < l->nrefusing; i++)
+            if (l->refusing[i].deadline < l->refusing[oldest].deadline)
+                oldest = i;
+        drop_refusal(l, oldest);
+    }
+    l->refusing[l->nrefusing].fd = fd;
+    l->refusing[l->nrefusing].deadline = io_now_ms() + LINGER_MS;
+    l->nrefusing++;
     format_peer(ss, peer, sizeof peer);
     log_line("%s refused (%s)", peer, reason);
+}
+
+/* Discards what a refused peer sent; 1 once it closed, failed or sent too much. */
+static int drain_refused(int fd)
+{
+    uint8_t sink[4096];
+    size_t total = 0;
+
+    for (;;) {
+        ssize_t r = recv(fd, sink, sizeof sink, 0);
+        if (r > 0) {
+            total += (size_t)r;
+            if (total > LINGER_MAX_BYTES)
+                return 1;
+        } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            return 0;
+        } else {
+            return 1;
+        }
+    }
 }
 
 /* Reaps every connection process that has exited; returns how many. */
@@ -801,6 +853,86 @@ static unsigned long reap_children(void)
     while (waitpid(-1, NULL, WNOHANG) > 0)
         n++;
     return n;
+}
+
+/* Accepts one connection and hands it to a new process, or refuses it. */
+static void accept_one(struct listener *l, const struct config *cfg)
+{
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof ss;
+    int fd = accept(l->fd, (struct sockaddr *)&ss, &sl);
+    unsigned long reaped;
+    pid_t pid;
+
+    if (fd < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR &&
+            errno != ECONNABORTED) {
+            struct timespec pause = { 0, 100 * 1000 * 1000 };
+            log_line("bserve: accept: %s", strerror(errno));
+            nanosleep(&pause, NULL);   /* e.g. out of descriptors: back off */
+        }
+        return;
+    }
+    reaped = reap_children();
+    l->live = reaped < l->live ? l->live - reaped : 0;
+    if (l->live >= l->max_conns) {
+        refuse(l, fd, &ss, "at capacity");
+        return;
+    }
+    pid = fork();
+    if (pid == 0) {
+        close(l->fd);
+        for (size_t i = 0; i < l->nrefusing; i++)
+            close(l->refusing[i].fd);
+        set_blocking(fd, 1);   /* BSD sockets inherit O_NONBLOCK from the listener */
+        exit(handle_connection(cfg, fd, &ss));
+    }
+    if (pid < 0) {
+        refuse(l, fd, &ss, strerror(errno));
+        return;
+    }
+    l->live++;
+    close(fd);
+}
+
+/* Waits for new connections and for refused ones to finish lingering. */
+static void run_listener(struct listener *l, const struct config *cfg)
+{
+    struct pollfd pfd[1 + MAX_REFUSING];
+
+    for (;;) {
+        int64_t now = io_now_ms();
+        int timeout = -1;
+        size_t n = l->nrefusing;
+
+        pfd[0].fd = l->fd;
+        pfd[0].events = POLLIN;
+        pfd[0].revents = 0;
+        for (size_t i = 0; i < n; i++) {
+            int64_t left = l->refusing[i].deadline - now;
+            pfd[1 + i].fd = l->refusing[i].fd;
+            pfd[1 + i].events = POLLIN;
+            pfd[1 + i].revents = 0;
+            if (left < 0)
+                left = 0;
+            if (timeout < 0 || left < timeout)
+                timeout = (int)left;
+        }
+        if (poll(pfd, (nfds_t)(1 + n), timeout) < 0 && errno != EINTR) {
+            log_line("bserve: poll: %s", strerror(errno));
+            continue;
+        }
+        now = io_now_ms();
+        for (size_t i = n; i-- > 0;) {   /* backwards: drop_refusal moves the last one */
+            int done = now >= l->refusing[i].deadline;
+            if (!done && pfd[1 + i].revents != 0)
+                done = drain_refused(l->refusing[i].fd);
+            if (done)
+                drop_refusal(l, i);
+        }
+        if (pfd[0].revents & POLLIN)
+            accept_one(l, cfg);
+    }
 }
 
 /* ---- startup ---------------------------------------------------------- */
@@ -859,9 +991,9 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     static struct config cfg;
+    static struct listener listener;
     unsigned long idle = DEFAULT_IDLE_SECONDS;
     unsigned long max_conns = DEFAULT_MAX_CONNECTIONS;
-    unsigned long live = 0;   /* connection processes not yet reaped */
     unsigned long port;
     unsigned bound;
     struct stat st;
@@ -901,40 +1033,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "bserve: port %lu: %s\n", port, strerror(errno));
         return 1;
     }
+    set_blocking(lfd, 0);   /* poll() said readable, but accept() must never wait */
     log_line("bserve: listening on 0.0.0.0:%u, root %s, idle timeout %lus, max %lu connections",
-             bound, cfg.root, idle, max_conns);
-
-    for (;;) {
-        struct sockaddr_storage ss;
-        socklen_t sl = sizeof ss;
-        int fd = accept(lfd, (struct sockaddr *)&ss, &sl);
-        unsigned long reaped;
-        pid_t pid;
-
-        if (fd < 0) {
-            if (errno != EINTR && errno != ECONNABORTED) {
-                struct timespec pause = { 0, 100 * 1000 * 1000 };
-                log_line("bserve: accept: %s", strerror(errno));
-                nanosleep(&pause, NULL);   /* e.g. out of descriptors: back off */
-            }
-            continue;
-        }
-        reaped = reap_children();
-        live = reaped < live ? live - reaped : 0;
-        if (live >= max_conns) {
-            refuse(fd, &ss, "at capacity");
-            continue;
-        }
-        pid = fork();
-        if (pid == 0) {
-            close(lfd);
-            exit(handle_connection(&cfg, fd, &ss));
-        }
-        if (pid < 0) {
-            refuse(fd, &ss, strerror(errno));
-            continue;
-        }
-        live++;
-        close(fd);
-    }
+             bound, argv[optind], idle, max_conns);
+    listener.fd = lfd;
+    listener.max_conns = max_conns;
+    run_listener(&listener, &cfg);
+    return 1;
 }

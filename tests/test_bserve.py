@@ -520,7 +520,19 @@ class TestCapacity(harness.SiteServerCase, unittest.TestCase):
             self.assertEqual(w.parse_goaway(f.payload), (0, w.BUSY))
             self.assertIsNone(w.read_frame(s))
             s.close()
-        self.server.wait_for(r" refused \(at capacity\)", count=2)
+        # A refused client that sends its REQUEST at once must still read the
+        # GOAWAY and a clean close: the server lingers instead of resetting.
+        for _ in range(10):
+            s = w.connect(self.server.port)
+            s.sendall(w.request(1, "/hello.txt"))
+            time.sleep(0.05)
+            s.sendall(w.request(2, "/hello.txt"))
+            f = w.read_frame(s)
+            self.assertIsNotNone(f, "connection reset before the GOAWAY was read")
+            self.assertEqual(w.parse_goaway(f.payload), (0, w.BUSY))
+            self.assertIsNone(w.read_frame(s))
+            s.close()
+        self.server.wait_for(r" refused \(at capacity\)", count=12)
         held.pop().close()                    # free one slot
         # The slot is free once that connection's process has exited, which
         # is a moment after it logs "close": retry until a request gets in.
