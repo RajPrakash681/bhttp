@@ -111,7 +111,7 @@ class Server(object):
         self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=self._log, start_new_session=True,
                                      env=sanitizer_env())
-        m = self.wait_for(r"listening on 0\.0\.0\.0:(\d+)")
+        m = self.wait_for(r"listening on (?:\[::\]|0\.0\.0\.0):(\d+)")
         self.port = int(m[0].group(1))
         return self
 

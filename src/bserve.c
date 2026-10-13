@@ -1095,7 +1095,6 @@ int main(int argc, char **argv)
     unsigned long port;
     unsigned bound;
     int dual;
-    char also[24] = "";
     struct stat st;
     int opt;
     int lfd;
@@ -1134,10 +1133,10 @@ int main(int argc, char **argv)
         return 1;
     }
     set_blocking(lfd, 0);   /* poll() said readable, but accept() must never wait */
-    if (dual)
-        snprintf(also, sizeof also, " and [::]:%u", bound);
-    log_line("bserve: listening on 0.0.0.0:%u%s, root %s, idle timeout %lus, max %lu connections",
-             bound, also, argv[optind], idle, max_conns);
+    /* one socket: "[::]:PORT (dual-stack)", or "0.0.0.0:PORT" on an IPv4-only host */
+    log_line("bserve: listening on %s:%u%s, root %s, idle timeout %lus, max %lu connections",
+             dual ? "[::]" : "0.0.0.0", bound, dual ? " (dual-stack)" : "", argv[optind],
+             idle, max_conns);
     listener.fd = lfd;
     listener.max_conns = max_conns;
     run_listener(&listener, &cfg);

@@ -102,7 +102,7 @@ class TestAgainstBserve(harness.SiteServerCase, unittest.TestCase):
 
     def test_ipv6_loopback(self):
         """bserve listens dual-stack; bcurl takes a bracketed IPv6 host."""
-        if " and [::]:" not in self.server.log():
+        if "(dual-stack)" not in self.server.log():
             self.skipTest("bserve fell back to IPv4 only (no IPv6 on this host)")
         try:
             socket.create_connection(("::1", self.server.port), timeout=2).close()

@@ -290,7 +290,7 @@ class Bserve(object):
         dl = time.time() + 10
         self.port = None
         while time.time() < dl and self.port is None:
-            m = re.search(r"listening on 0\.0\.0\.0:(\d+)", self.text())
+            m = re.search(r"listening on (?:\[::\]|0\.0\.0\.0):(\d+)", self.text())
             if m:
                 self.port = int(m.group(1))
             else:
