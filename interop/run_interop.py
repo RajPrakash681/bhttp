@@ -919,7 +919,7 @@ def s_dates(raw: Raw, tree: Tree) -> None:
 
 
 def s_content_types(raw: Raw, tree: Tree) -> None:
-    """§8: content-type follows the extension table."""
+    """§8: content-type follows the extension (bserve's table, top-level README)."""
     want = {b"/small.txt": b"text/plain; charset=utf-8",
             b"/sub/page.html": b"text/html; charset=utf-8",
             b"/big.bin": b"application/octet-stream"}
@@ -1151,7 +1151,7 @@ SERVER_TESTS = [
     ("HEAD bad path: 400, no DATA", srv_case(s_head_error(request_payload(b"/a/../b", method=HEAD)))),
     ("HEAD bad c-l: 400, no DATA", srv_case(s_head_error(request_payload(b"/small.txt", method=HEAD, headers=cl(b"5"))))),
     ("date, last-modified IMF-fixdate", srv_case(s_dates)),
-    ("content-type per §8 table", srv_case(s_content_types)),
+    ("content-type by extension", srv_case(s_content_types)),
     ("POST + body -> 405, allow", srv_case(s_405)),
     ("/sub -> 301 location /sub/", srv_case(path_status(b"/sub", 301, location=b"/sub/"))),
     ("/sub/ -> index.html", srv_case(path_status(b"/sub/", 200, "/sub/index.html"))),
@@ -1511,7 +1511,7 @@ def expect_code(code: int, what: str, conns: Optional[int] = None,
 
 
 def expect_path(want: bytes) -> Callable[[ClientRun, ScriptedServer], None]:
-    """The raw Path of the first REQUEST (§11 URL grammar)."""
+    """The raw Path of the first REQUEST (bcurl's URL grammar, top-level README)."""
     def fn(r: ClientRun, s: ScriptedServer) -> None:
         check(bool(s.requests), "no REQUEST sent (exit %s; %s)" % (r.code, short(r.err)))
         payload = s.requests[0].payload
@@ -1567,11 +1567,11 @@ CLIENT_TESTS = [
                                                  expect_code(EXIT_FAILED, "404 then a protocol error"))),
     ("§11: closed, never reopened", scripted(c_close_after_first, ["/a", "/b"],
                                               expect_code(EXIT_FAILED, "a close between requests", conns=1, out=BODY))),
-    ("§11 URL: #fragment not sent", url_case("/x#frag", b"/x")),
-    ("§11 URL: host:port?q -> /?q", url_case("?q=1", b"/?q=1")),
-    ("§11 URL: host:port -> /", url_case("", b"/")),
-    ("§11 URL: host:port#f -> /", url_case("#f", b"/")),
-    ("§11 URL: path sent unchanged", url_case("/a/../b%2e?x#y", b"/a/../b%2e?x")),
+    ("URL: #fragment not sent", url_case("/x#frag", b"/x")),
+    ("URL: host:port?q -> /?q", url_case("?q=1", b"/?q=1")),
+    ("URL: host:port -> /", url_case("", b"/")),
+    ("URL: host:port#f -> /", url_case("#f", b"/")),
+    ("URL: path sent unchanged", url_case("/a/../b%2e?x#y", b"/a/../b%2e?x")),
     ("§11 usage: two origins -> 1", usage_case(lambda p: [_url(p, "/a"), _url(p + 1, "/b")])),
     ("§11 usage: http:// -> 1", usage_case(lambda p: ["http://%s:%d/a" % (HOST, p)])),
     ("§11 usage: bad port -> 1", usage_case(lambda p: ["%s:%dx/a" % (HOST, p)])),

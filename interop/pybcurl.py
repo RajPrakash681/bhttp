@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pybcurl [-v] [-t seconds] URL...: a bhttp/1 client written from SPEC.md.
 
-Follows the reference-client contract of SPEC.md §11.  URL is
+Follows SPEC.md §11 and bcurl's URL grammar (top-level README).  URL is
 [bhttp://]host[:port][path]; the port defaults to 9000; the host ends at the
 first ':', '/', '?' or '#'; a #fragment is never sent; an empty path becomes
 '/' and a path starting with '?' gets a '/' in front.  All URLs must name the
