@@ -38,7 +38,7 @@ stderr:
 <     content-type: text/plain; charset=utf-8   [index 4]
 <     content-length: 14   [index 5]
 <     last-modified: Thu, 08 Oct 2026 12:01:37 GMT   [index 6]
-<     date: Tue, 13 Oct 2026 06:49:38 GMT   [index 7]
+<     date: Tue, 13 Oct 2026 07:02:10 GMT   [index 7]
 <     server: bserve/1.0   [index 8]
 <   0000  00 70 02 00 00 00 00 01  00 c8 04 00 19 74 65 78  |.p...........tex|
 <   0010  74 2f 70 6c 61 69 6e 3b  20 63 68 61 72 73 65 74  |t/plain; charset|
@@ -46,7 +46,7 @@ stderr:
 <   0030  75 2c 20 30 38 20 4f 63  74 20 32 30 32 36 20 31  |u, 08 Oct 2026 1|
 <   0040  32 3a 30 31 3a 33 37 20  47 4d 54 07 00 1d 54 75  |2:01:37 GMT...Tu|
 <   0050  65 2c 20 31 33 20 4f 63  74 20 32 30 32 36 20 30  |e, 13 Oct 2026 0|
-<   0060  36 3a 34 39 3a 33 38 20  47 4d 54 08 00 0a 62 73  |6:49:38 GMT...bs|
+<   0060  37 3a 30 32 3a 31 30 20  47 4d 54 08 00 0a 62 73  |7:02:10 GMT...bs|
 <   0070  65 72 76 65 2f 31 2e 30                           |erve/1.0|
 < DATA id=1 length=14 flags=0x01 (END): 14 body bytes
 <   0000  00 0e 03 01 00 00 00 01  48 65 6c 6c 6f 2c 20 62  |........Hello, b|
@@ -64,10 +64,10 @@ exit=0
 The server's log for the same run (stderr of `bserve`):
 
 ```text
-2026-10-13T06:49:38Z bserve: listening on 0.0.0.0:9000 and [::]:9000, root ./www, idle timeout 30s, max 64 connections
-2026-10-13T06:49:38Z [::1]:60627 connect
-2026-10-13T06:49:38Z [::1]:60627 GET /hello.txt 200 14
-2026-10-13T06:49:38Z [::1]:60627 close (peer closed, 1 request)
+2026-10-13T07:02:10Z bserve: listening on [::]:9000 (dual-stack), root ./www, idle timeout 30s, max 64 connections
+2026-10-13T07:02:10Z [::1]:51031 connect
+2026-10-13T07:02:10Z [::1]:51031 GET /hello.txt 200 14
+2026-10-13T07:02:10Z [::1]:51031 close (peer closed, 1 request)
 ```
 
 bserve listens on IPv4 and IPv6, and `localhost` resolved to `::1` first, so this exchange
@@ -138,10 +138,10 @@ off   bytes                    field         meaning
       37 20 47 4d 54
 004b  07                       Index         7 = date
 004c  00 1d                    VLen          29
-004e  54 75 65 2c 20 31 33 20  Value         "Tue, 13 Oct 2026 06:49:38 GMT"
+004e  54 75 65 2c 20 31 33 20  Value         "Tue, 13 Oct 2026 07:02:10 GMT"
       4f 63 74 20 32 30 32 36
-      20 30 36 3a 34 39 3a 33
-      38 20 47 4d 54
+      20 30 37 3a 30 32 3a 31
+      30 20 47 4d 54
 006b  08                       Index         8 = server
 006c  00 0a                    VLen          10
 006e  62 73 65 72 76 65 2f 31  Value         "bserve/1.0"
@@ -212,7 +212,7 @@ $ python3 tools/wire_demo.py localhost 9000
 <   0030  75 2c 20 30 38 20 4f 63  74 20 32 30 32 36 20 31  |u, 08 Oct 2026 1|
 <   0040  32 3a 30 31 3a 33 37 20  47 4d 54 07 00 1d 54 75  |2:01:37 GMT...Tu|
 <   0050  65 2c 20 31 33 20 4f 63  74 20 32 30 32 36 20 30  |e, 13 Oct 2026 0|
-<   0060  36 3a 34 39 3a 33 39 20  47 4d 54 08 00 0a 62 73  |6:49:39 GMT...bs|
+<   0060  37 3a 30 32 3a 31 31 20  47 4d 54 08 00 0a 62 73  |7:02:11 GMT...bs|
 <   0070  65 72 76 65 2f 31 2e 30                           |erve/1.0|
 < DATA id=1 length=14 flags=0x01 (END)
 <   0000  00 0e 03 01 00 00 00 01  48 65 6c 6c 6f 2c 20 62  |........Hello, b|
@@ -225,10 +225,10 @@ $ python3 tools/wire_demo.py localhost 9000
 The server's log for that run:
 
 ```text
-2026-10-13T06:49:39Z bserve: listening on 0.0.0.0:9000 and [::]:9000, root ./www, idle timeout 1s, max 64 connections
-2026-10-13T06:49:39Z [::1]:60628 connect
-2026-10-13T06:49:39Z [::1]:60628 GET /hello.txt 200 14
-2026-10-13T06:49:40Z [::1]:60628 close (idle timeout, 1 request)
+2026-10-13T07:02:11Z bserve: listening on [::]:9000 (dual-stack), root ./www, idle timeout 1s, max 64 connections
+2026-10-13T07:02:11Z [::1]:51036 connect
+2026-10-13T07:02:11Z [::1]:51036 GET /hello.txt 200 14
+2026-10-13T07:02:12Z [::1]:51036 close (idle timeout, 1 request)
 ```
 
 The REQUEST, RESPONSE and DATA frames have the same layout as frames 1 to 3 above; this
