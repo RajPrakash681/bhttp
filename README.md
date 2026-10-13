@@ -49,7 +49,8 @@ Python↔Python): all 308 checks pass (310 with `--slow`), and CI runs them on e
 
 - `make test`: C unit tests for the codec and 78 conformance tests, run against
   AddressSanitizer + UndefinedBehaviorSanitizer builds, on macOS (clang) and Linux (gcc).
-- `make interop`: the cross-implementation matrix, 308 checks (310 with `--slow`) ([interop/README.md](interop/README.md)).
+- `make interop`: the cross-implementation matrix, 308 checks (310 with `--slow`)
+  ([interop/README.md](interop/README.md)).
 - [fuzz/](fuzz/): libFuzzer harnesses for every parser plus network fuzzers for both
   programs; about 400 million executions on 633e106 and 7ce6503, then a re-run on d98fb56
   of the targets the later fixes touched; no crash, sanitizer report or leak
@@ -82,20 +83,21 @@ exit 4
 ```
 
 ```text
-2026-10-13T06:49:23Z bserve: listening on 0.0.0.0:9000 and [::]:9000, root ./www, idle timeout 30s, max 64 connections
-2026-10-13T06:49:24Z [::1]:60549 connect
-2026-10-13T06:49:24Z [::1]:60549 GET /hello.txt 200 14
-2026-10-13T06:49:24Z [::1]:60549 close (peer closed, 1 request)
-2026-10-13T06:49:24Z [::1]:60550 connect
-2026-10-13T06:49:24Z [::1]:60550 GET / 200 542
-2026-10-13T06:49:24Z [::1]:60550 GET /missing.html 404 14
-2026-10-13T06:49:24Z [::1]:60550 GET /style.css 200 269
-2026-10-13T06:49:24Z [::1]:60550 close (peer closed, 3 requests)
+2026-10-13T07:07:08Z bserve: listening on [::]:9000 (dual-stack), root ./www, idle timeout 30s, max 64 connections
+2026-10-13T07:07:09Z [::1]:53349 connect
+2026-10-13T07:07:09Z [::1]:53349 GET /hello.txt 200 14
+2026-10-13T07:07:09Z [::1]:53349 close (peer closed, 1 request)
+2026-10-13T07:07:09Z [::1]:53350 connect
+2026-10-13T07:07:09Z [::1]:53350 GET / 200 542
+2026-10-13T07:07:09Z [::1]:53350 GET /missing.html 404 14
+2026-10-13T07:07:09Z [::1]:53350 GET /style.css 200 269
+2026-10-13T07:07:09Z [::1]:53350 close (peer closed, 3 requests)
 ```
 
 The second command fetched three URLs over one connection: one `connect`, three requests,
 one `close`. (`localhost` resolved to `::1` on this machine, so the peer is logged as
-`[::1]`; an IPv4 client is logged as `127.0.0.1:port`.) For the `-v` output, see [HEXDUMP.md](HEXDUMP.md).
+`[::1]`; an IPv4 client is logged as `127.0.0.1:port`.) For the `-v` output, see
+[HEXDUMP.md](HEXDUMP.md).
 
 ## Design summary
 
@@ -130,8 +132,8 @@ bserve [-t idle_seconds] [-c max_connections] ROOT PORT
 ```
 
 - Listens on every IPv4 and IPv6 address: one dual-stack socket (`IPV6_V6ONLY` off),
-  falling back to IPv4 only if IPv6 is unavailable, with `SO_REUSEADDR`. `PORT` 0 picks a free port and the
-  first log line says which one (the tests use this).
+  falling back to IPv4 only if IPv6 is unavailable, with `SO_REUSEADDR`. `PORT` 0 picks a
+  free port and the first log line says which one (the tests use this).
 - **One process per connection (`fork`).** A connection's state (two 16 KiB frame
   buffers and a file descriptor) lives in its own address space, so one connection cannot
   corrupt or crash another or the listener, and nothing needs a lock. A process per client
