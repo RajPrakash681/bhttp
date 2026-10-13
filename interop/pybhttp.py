@@ -28,6 +28,9 @@ KNOWN_TYPES = {REQUEST: "REQUEST", RESPONSE: "RESPONSE", DATA: "DATA", GOAWAY: "
 
 GOAWAY_NO_ERROR = 0x00
 GOAWAY_PROTOCOL_ERROR = 0x01
+GOAWAY_BUSY = 0x02  # §2: the server refused the connection
+GOAWAY_CODES = {GOAWAY_NO_ERROR: "NO_ERROR", GOAWAY_PROTOCOL_ERROR: "PROTOCOL_ERROR",
+                GOAWAY_BUSY: "BUSY"}
 
 # --- §5.1 methods ----------------------------------------------------------
 
@@ -141,13 +144,14 @@ class FrameReader:
         readable, _, _ = select.select([self.sock], [], [], 0)
         return bool(readable)
 
-    def read_any(self, idle: Optional[float] = None) -> Optional[Frame]:
-        """Read one frame of any type.  `idle` bounds the wait for the whole frame."""
-        if idle is None:
+    def read_any(self, deadline: Optional[float] = None) -> Optional[Frame]:
+        """Read one frame of any type; IdleTimeout if it isn't complete by `deadline`
+        (a time.monotonic() value)."""
+        if deadline is None:
             return self._read_any(None)
         saved = self.sock.gettimeout()  # sends must not inherit a short read timeout
         try:
-            return self._read_any(time.monotonic() + idle)
+            return self._read_any(deadline)
         finally:
             self.sock.settimeout(saved)
 
@@ -167,10 +171,13 @@ class FrameReader:
             self.on_frame(frame)
         return frame
 
-    def read(self, idle: Optional[float] = None) -> Optional[Frame]:
-        """Read the next frame whose type is known, skipping unknown ones."""
+    def read(self, deadline: Optional[float] = None) -> Optional[Frame]:
+        """Read the next frame whose type is known, skipping unknown ones.
+
+        The deadline is shared by the skipped frames: they don't earn more time (§2).
+        """
         while True:
-            frame = self.read_any(idle)
+            frame = self.read_any(deadline)
             if frame is None or frame.known:
                 return frame
 
@@ -318,7 +325,7 @@ def decode_goaway(payload: bytes) -> Tuple[int, int]:
     if len(payload) < 5:
         return 0, GOAWAY_PROTOCOL_ERROR
     last_id, code = struct.unpack_from("!IB", payload, 0)
-    if code not in (GOAWAY_NO_ERROR, GOAWAY_PROTOCOL_ERROR):
+    if code not in GOAWAY_CODES:
         code = GOAWAY_PROTOCOL_ERROR
     return last_id, code
 
@@ -350,7 +357,7 @@ def describe(frame: Frame) -> str:
             detail = "%d [%s]" % (status, _fmt_headers(hdrs))
         elif frame.type == GOAWAY:
             last_id, code = decode_goaway(frame.payload)
-            detail = "last-id=%d code=0x%02x" % (last_id, code)
+            detail = "last-id=%d code=0x%02x %s" % (last_id, code, GOAWAY_CODES[code])
         elif frame.type == DATA:
             detail = _hex(frame.payload, 16)
         else:

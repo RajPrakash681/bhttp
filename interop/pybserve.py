@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""pybserve ROOT PORT [--idle SECONDS]: a bhttp/1 file server written from SPEC.md.
+"""pybserve [--idle SECONDS] [-c MAX] ROOT PORT: a bhttp/1 file server written from SPEC.md.
 
-One thread per connection.  Requests are answered strictly in order (§2).
+One thread per connection, at most MAX at once; further connections get GOAWAY
+BUSY and are closed (§2).  Requests are answered strictly in order.
 Logs one line per accepted connection and per request to stderr.
 """
 
@@ -21,6 +22,7 @@ from pybhttp import Frame, Headers
 
 SERVER_NAME = b"pybserve/1"
 DEFAULT_IDLE = 30.0
+DEFAULT_MAX_CONNECTIONS = 64
 DRAIN_SECONDS = 2.0
 ALLOWED = b"GET, HEAD"
 
@@ -90,6 +92,11 @@ class Connection:
         self.idle = idle
         self.reader = bh.FrameReader(sock)
         self.last_answered = 0
+        self.deadline = 0.0  # idle limit for the next frame (§2)
+
+    def earn_time(self) -> None:
+        """§2: only a complete REQUEST, or a DATA frame of an open body, resets T."""
+        self.deadline = time.monotonic() + self.idle
 
     # sending
 
@@ -123,12 +130,15 @@ class Connection:
     # main loop
 
     def serve(self) -> None:
+        self.earn_time()
         try:
             while True:
                 frame = self.next_frame()
                 if frame is None:
                     return
                 self.dispatch(frame)
+                if frame.type == bh.REQUEST:  # unknown or stray frames earn nothing
+                    self.earn_time()
         except PeerGone:
             pass
         except ConnError as exc:
@@ -144,7 +154,7 @@ class Connection:
 
     def next_frame(self) -> Optional[Frame]:
         try:
-            return self.reader.read(self.idle)
+            return self.reader.read(self.deadline)
         except bh.FrameTooLarge as exc:
             raise ConnError(str(exc))
         except bh.TruncatedFrame:
@@ -172,6 +182,7 @@ class Connection:
     def read_body(self, rid: int) -> bytes:
         """Read DATA frames for `rid` through END (§6)."""
         body = bytearray()
+        self.earn_time()  # the REQUEST that opened the body is complete
         while True:
             frame = self.next_frame()
             if frame is None:
@@ -184,6 +195,7 @@ class Connection:
             body += frame.payload
             if frame.end:
                 return bytes(body)
+            self.earn_time()
 
     def handle_request(self, frame: Frame) -> None:
         body = b"" if frame.end else self.read_body(frame.rid)
@@ -278,18 +290,42 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, port: int, root: bytes, idle: float) -> None:
+    def __init__(self, port: int, root: bytes, idle: float, max_connections: int) -> None:
         self.root = root
         self.idle = idle
+        self.max_connections = max_connections
+        self.live = 0
+        self.live_lock = threading.Lock()
         super().__init__(("", port), Handler)
+
+    def admit(self) -> bool:
+        with self.live_lock:
+            if self.live >= self.max_connections:
+                return False
+            self.live += 1
+            return True
+
+    def release(self) -> None:
+        with self.live_lock:
+            self.live -= 1
 
 
 class Handler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         sock: socket.socket = self.request
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        server: Server = self.server  # type: ignore[assignment]
+        conn = Connection(sock, server.root, server.idle)
+        if not server.admit():
+            log("refused %s:%d: at capacity" % self.client_address[:2])
+            conn.goaway_and_close(bh.GOAWAY_BUSY)  # Last-ID 0: nothing was processed
+            sock.close()
+            return
         log("accepted connection from %s:%d" % self.client_address[:2])
-        Connection(sock, self.server.root, self.server.idle).serve()
+        try:
+            conn.serve()
+        finally:
+            server.release()
 
 
 def main(argv: List[str]) -> int:
@@ -298,12 +334,14 @@ def main(argv: List[str]) -> int:
     ap.add_argument("port", type=int)
     ap.add_argument("--idle", type=float, default=DEFAULT_IDLE,
                     help="idle timeout in seconds (default %(default)s)")
+    ap.add_argument("-c", "--max-connections", type=int, default=DEFAULT_MAX_CONNECTIONS,
+                    help="connections served at once; more get GOAWAY BUSY (default %(default)s)")
     args = ap.parse_args(argv)
     root = os.path.realpath(os.fsencode(args.root))
     if not os.path.isdir(root):
         ap.error("ROOT is not a directory")
     try:
-        server = Server(args.port, root, args.idle)
+        server = Server(args.port, root, args.idle, max(1, args.max_connections))
     except OSError as exc:
         print("pybserve: cannot listen on port %d: %s" % (args.port, exc), file=sys.stderr)
         return 1

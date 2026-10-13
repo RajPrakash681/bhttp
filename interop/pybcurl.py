@@ -148,8 +148,8 @@ class Client:
                 raise Failure("server closed the connection")
             if frame.type == bh.GOAWAY:
                 last_id, code = bh.decode_goaway(frame.payload)
-                raise Failure("server sent GOAWAY (last-id %d, code 0x%02x); not sending "
-                              "more requests" % (last_id, code))
+                raise Failure("server sent GOAWAY (last-id %d, %s); not sending more requests"
+                              % (last_id, bh.GOAWAY_CODES[code]))
             if frame.known:
                 raise Failure("protocol error: unexpected %s between responses"
                               % bh.KNOWN_TYPES[frame.type])
@@ -200,8 +200,8 @@ class Client:
         """Rules shared by every frame of a response (§7 "Clients")."""
         if frame.type == bh.GOAWAY:
             last_id, code = bh.decode_goaway(frame.payload)
-            raise Failure("server sent GOAWAY (last-id %d, code 0x%02x) before END: request %d "
-                          "was not processed" % (last_id, code, rid))
+            raise Failure("server sent GOAWAY (last-id %d, %s) before END: request %d was not "
+                          "processed" % (last_id, bh.GOAWAY_CODES[code], rid))
         if frame.type == bh.REQUEST:
             raise Failure("protocol error: server sent a REQUEST")
         if frame.type == bh.RESPONSE and frame.rid == 0:
