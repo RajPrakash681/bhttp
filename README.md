@@ -206,6 +206,8 @@ tests/bhttp_wire.py   independent Python implementation of the wire format
 tests/test_*.py       conformance tests for bserve and bcurl
 tests/run_tests.py    test runner used by make test
 tools/                renders SPEC.md to SPEC.pdf; checks its page count
+interop/              a second client and server in Python, written from SPEC.md alone,
+                      and a matrix that cross-tests all four pairings (interop/README.md)
 ```
 
 To regenerate SPEC.pdf after editing SPEC.md (needs Node and Playwright's Chromium):
