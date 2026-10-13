@@ -19,12 +19,14 @@ or handshake: the client's first bytes are its first frame.
   (its END has arrived). A server MUST answer requests in the order received.
 - The **client closes** when it has no more requests; this is the normal end. It MAY send
   GOAWAY first.
-- The **server closes** (a) after a connection error (§7), or (b) when idle: a frame has
-  not arrived complete within T seconds of the server starting to wait for it (bytes of a
-  partial frame do not extend T; T is implementation-defined, SHOULD be at least 10; bserve
-  uses 30). Before closing on its own initiative a server SHOULD send GOAWAY, then SHOULD
+- The **server closes** (a) after a connection error (§7), or (b) when idle: T seconds
+  pass without a complete REQUEST (inside a request body: without a complete DATA frame of
+  it); other frames, such as unknown types, and partial frames do not extend T (T is
+  implementation-defined, SHOULD be at least 10; bserve uses 30). Before closing on its own initiative a server SHOULD send GOAWAY, then SHOULD
   shut down its sending side and read and discard input for a short time (≤ 2 s) before
   closing, so that the peer receives the GOAWAY rather than a reset.
+- A server MAY refuse a connection it cannot take (bserve: beyond 64 at once) by sending
+  GOAWAY with Last-ID 0 and Code `0x02` BUSY, then closing; the client MAY retry later.
 - A receiver whose connection ends in the middle of a frame discards the partial frame
   and closes. Nothing is sent in reply.
 
@@ -57,10 +59,10 @@ Every frame is an 8-byte header followed by `Length` bytes of payload.
 
 | Field | HTTP/2 | bhttp | Reason |
 |---|---|---|---|
-| Length | 24 | 16 | v1 frames carry at most 16 KiB, HTTP/2's default limit too. That needs 15 bits; the 16th lets a later version negotiate frames up to 64 KiB. HTTP/2 needs 24 only because SETTINGS can raise its limit to 16 MiB; at 16 KiB the header is already 0.05 % overhead, so bigger frames only buy bigger buffers. Bonus: text such as `GET /` starts with a letter ≥ `0x41`, reads as Length ≥ 16640, and is rejected on its first two bytes. |
+| Length | 24 | 16 | v1 frames carry at most 16 KiB (HTTP/2's default limit too): 15 bits; the 16th lets a later version negotiate frames up to 64 KiB. HTTP/2 needs 24 only because SETTINGS can raise its limit to 16 MiB; at 16 KiB the header is already 0.05 % overhead. Bonus: text such as `GET /` starts with a letter ≥ `0x41`, reads as Length ≥ 16640, and is rejected on its first two bytes. |
 | Type | 8 | 8 | Same as HTTP/2. v1 uses 4 values; the other 252 are the room for version 2 (§9). |
 | Flags | 8 | 8 | Same. v1 needs one bit (END); seven spare bits cost nothing. |
-| ID | 1+31 | 32 | v1 does not multiplex, so responses could be matched by order alone. The ID is kept because (1) a client detects a desynchronised connection instead of printing the wrong page, and (2) the header is the one thing no later version may change, since every receiver must find Length in the same place to skip unknown frames, so room for multiplexing must be reserved now. HTTP/2's reserved bit is a SPDY leftover; 32 full bits never wrap on a real connection and keep the header at 8 bytes with every field naturally aligned. |
+| ID | 1+31 | 32 | v1 does not multiplex, so order alone could match responses. The ID is kept because (1) a client detects a desynchronised connection instead of printing the wrong page, and (2) the header is the one thing no later version may change (every receiver must find Length in the same place to skip unknown frames), so room for multiplexing is reserved now. HTTP/2's reserved bit is a SPDY leftover; 32 full bits never wrap and keep the header at 8 bytes, every field naturally aligned. |
 
 ## 4. Frame types
 
@@ -84,7 +86,7 @@ for private experiments. A v1 sender MUST NOT send any of them.
 **GOAWAY** says "I will close; send no more requests". Its Request ID is 0 and is ignored
 on receipt. *Last-ID* is, from a server, the ID of the last request it answered completely
 (0 if none); a client sends 0. *Code*: `0x00` NO_ERROR (idle timeout, shutdown), `0x01`
-PROTOCOL_ERROR; any other value is treated as `0x01`. Bytes after the first five are
+PROTOCOL_ERROR, `0x02` BUSY (§2); any other value is treated as `0x01`. Bytes after the first five are
 ignored; a shorter payload is still a GOAWAY, read as Last-ID 0 and Code `0x01`. The
 receiver MUST NOT send another REQUEST and SHOULD close. Requests with an ID above Last-ID
 were not processed and MAY be retried on a new connection.
@@ -112,15 +114,16 @@ literal:  | 0x00 | NLen (8) | Name | VLen (16) | Value |
 
 Index is 8 bits, NLen (name length) 8 bits, VLen (value length) 16 bits. The static table:
 
-| Index | Name | Sent by | Index | Name | Sent by |
-|---|---|---|---|---|---|
-| 1 | `host` | client | 6 | `last-modified` | server |
-| 2 | `user-agent` | client | 7 | `date` | server |
-| 3 | `accept` | client | 8 | `server` | server |
-| 4 | `content-type` | server | 9 | `location` | server (301) |
-| 5 | `content-length` | server | 10 | `allow` | server (405) |
+| Index | Name | Index | Name |
+|---|---|---|---|
+| 1 | `host` | 6 | `last-modified` |
+| 2 | `user-agent` | 7 | `date` |
+| 3 | `accept` | 8 | `server` |
+| 4 | `content-type` | 9 | `location` |
+| 5 | `content-length` | 10 | `allow` |
 
-These are exactly the ten names bcurl and bserve send. A name in the table SHOULD be sent
+These are exactly the ten names bcurl and bserve send: 1–3 by the client, 4–10 by the
+server (9 with a 301, 10 with a 405). A name in the table SHOULD be sent
 indexed; receivers MUST accept the literal form too. An entry is malformed if its Index is
 11–255, if it runs past the end of the payload, if a literal Name is empty or has a byte
 other than lowercase `a-z 0-9 ! # $ % & ' * + - . ^ _ | ~` and backtick, or if a Value
@@ -184,13 +187,15 @@ A server serving files from a directory ROOT maps the Path as follows: drop the 
 if the path ends in `/`, append `index.html`; if any segment starts with `.`, 404; resolve
 ROOT + path with all symbolic links followed, and if the result is not inside ROOT
 (resolved the same way), 404; a directory gets 301 (§7), or 404 if the path already ended
-in `/`; anything else that is not a regular file, 404. Syntax errors are 400 (§5.1), so
+in `/`; anything else that is not a regular file, 404. This MUST hold for what is actually
+opened even if the tree changes meanwhile: bserve opens the resolved name component by
+component from ROOT without following links, so a link swapped in gives 404. Syntax errors are 400 (§5.1), so
 `..`, a Path without the leading `/`, and NUL bytes never reach the file system.
-`content-type` SHOULD follow the file extension; bserve maps `html htm` to `text/html`,
-`css` `text/css`, `js` `text/javascript`, `txt` `text/plain`, `md` `text/markdown` (each
-with `; charset=utf-8`), `json` `application/json`, `png` `image/png`, `jpg jpeg`
-`image/jpeg`, `gif` `image/gif`, `svg` `image/svg+xml`, `ico` `image/x-icon`, `pdf`
-`application/pdf`, and anything else to `application/octet-stream`.
+`content-type` SHOULD follow the file extension. bserve: html, htm → text/html; css →
+text/css; js → text/javascript; txt → text/plain; md → text/markdown (these five with
+`; charset=utf-8`); json → application/json; pdf → application/pdf; png → image/png;
+gif → image/gif; jpg, jpeg → image/jpeg; svg → image/svg+xml; ico → image/x-icon; any
+other → application/octet-stream.
 
 ## 9. Versions
 
@@ -244,10 +249,9 @@ in the order 2, 5, 4, 0.
 
 ## 12. Conformance checklist
 
-- [ ] Both: big-endian integers; Length > 16384 is a connection error; unknown types are
-  skipped by exactly Length bytes; unknown flag bits ignored; reserved types never sent.
-- [ ] Both: header block with the ten-name table and the literal form; DATA reassembled
-  through END; `content-length` checked against the body.
+- [ ] Both: big-endian; Length > 16384 is a connection error; unknown types skipped by
+  exactly Length bytes; unknown flags ignored; reserved types never sent; ten-name table
+  and literal form; DATA reassembled through END; `content-length` checked.
 - [ ] Client: IDs 1, 2, 3, … on one connection; one request at a time; the ID of every
   RESPONSE and DATA checked; protocol errors (§7) end the connection.
 - [ ] Server: ID copied to RESPONSE and DATA; request errors get 400 and keep the
