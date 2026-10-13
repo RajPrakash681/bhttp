@@ -65,32 +65,38 @@ def check(cond: bool, msg: str) -> None:
 
 class ServerImpl(NamedTuple):
     name: str
-    argv: Callable[[str, int], List[str]]
+    argv: Callable[..., List[str]]  # (root, port, idle_seconds=None)
 
 
 class ClientImpl(NamedTuple):
     name: str
     argv: Callable[[bool, List[str]], List[str]]
     url: Callable[[int, str], str]
-    # Exit codes each client documents (SPEC.md defines none):
-    exit_4xx: int       # a 4xx response came back
-    exit_protocol: int  # protocol error (SPEC.md §7 "Clients")
-    exit_connect: int   # could not connect
+
+
+# Reference-client exit codes (SPEC.md §11); both clients follow them.
+EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_4XX, EXIT_5XX = 0, 1, 2, 4, 5
 
 
 def _url(port: int, path: str) -> str:
     return "bhttp://%s:%d%s" % (HOST, port, path)
 
 
+def _idle(flag: str, idle: Optional[int]) -> List[str]:
+    return [flag, str(idle)] if idle else []
+
+
 SERVERS = {
-    "C": ServerImpl("C", lambda root, port: [os.path.join(REPO, "bserve"), root, str(port)]),
-    "Py": ServerImpl("Py", lambda root, port: [PY, os.path.join(HERE, "pybserve.py"), root, str(port)]),
+    "C": ServerImpl("C", lambda root, port, idle=None:
+                    [os.path.join(REPO, "bserve")] + _idle("-t", idle) + [root, str(port)]),
+    "Py": ServerImpl("Py", lambda root, port, idle=None:
+                     [PY, os.path.join(HERE, "pybserve.py")] + _idle("--idle", idle) + [root, str(port)]),
 }
 CLIENTS = {
     "C": ClientImpl("C", lambda v, urls: [os.path.join(REPO, "bcurl")] + (["-v"] if v else []) + urls,
-                    _url, exit_4xx=4, exit_protocol=2, exit_connect=2),
+                    _url),
     "Py": ClientImpl("Py", lambda v, urls: [PY, os.path.join(HERE, "pybcurl.py")] + (["-v"] if v else []) + urls,
-                     _url, exit_4xx=1, exit_protocol=4, exit_connect=3),
+                     _url),
 }
 
 
@@ -123,7 +129,10 @@ class ClientRun(NamedTuple):
 
 
 def run_client(impl: ClientImpl, port: int, paths: List[str], verbose: bool = False) -> ClientRun:
-    argv = impl.argv(verbose, [impl.url(port, p) for p in paths])
+    return run_argv(impl.argv(verbose, [impl.url(port, p) for p in paths]))
+
+
+def run_argv(argv: List[str]) -> ClientRun:
     try:
         p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=CLIENT_TIMEOUT)
@@ -144,12 +153,15 @@ def expect_success(run: ClientRun, want: bytes) -> None:
           % (len(run.out), len(want), first_diff(run.out, want)))
 
 
-def expect_protocol_error(cli: "ClientImpl", run: ClientRun) -> None:
+def expect_exit(run: ClientRun, want: int, what: str) -> None:
     check(run.code is not None, "client hung (killed after %ds)" % CLIENT_TIMEOUT)
-    check(run.code != 0, "exit 0 on a protocol error; stdout: %s" % short(run.out))
     check(run.code >= 0, "client died from signal %d" % -run.code)
-    check(run.code == cli.exit_protocol, "exit %d, documented %d for a protocol error; stderr: %s"
-          % (run.code, cli.exit_protocol, short(run.err)))
+    check(run.code == want, "exit %d for %s, §11 says %d; stderr: %s"
+          % (run.code, what, want, short(run.err)))
+
+
+def expect_protocol_error(run: ClientRun) -> None:
+    expect_exit(run, EXIT_FAILED, "a protocol error")
 
 
 def first_diff(a: bytes, b: bytes) -> str:
@@ -211,9 +223,11 @@ def remove_tree(tree: Tree) -> None:
 # ---------------------------------------------------------------------------
 
 class RunningServer:
-    def __init__(self, impl: ServerImpl, root: str, logdir: str) -> None:
+    def __init__(self, impl: ServerImpl, root: str, logdir: str,
+                 idle: Optional[int] = None) -> None:
         self.impl = impl
         self.root = root
+        self.idle = idle
         self.log_path = os.path.join(logdir, "server-%s.log" % impl.name)
         self.proc: Optional[subprocess.Popen] = None
         self.port = 0
@@ -222,7 +236,7 @@ class RunningServer:
     def start(self) -> None:
         self.port = free_port()
         log = open(self.log_path, "ab")
-        self.proc = subprocess.Popen(self.impl.argv(self.root, self.port), stdout=log,
+        self.proc = subprocess.Popen(self.impl.argv(self.root, self.port, self.idle), stdout=log,
                                      stderr=log, stdin=subprocess.DEVNULL)
         log.close()
         deadline = time.monotonic() + 10
@@ -433,7 +447,7 @@ def pair_404(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
     px.close()
     check(run.code is not None, "client hung")
     check(px.statuses() == [(1, 404)], "statuses seen %s, want [(1, 404)]" % px.statuses())
-    check(run.code == cli.exit_4xx, "exit %s, documented %s" % (run.code, cli.exit_4xx))
+    expect_exit(run, EXIT_4XX, "a 404")
 
 
 def pair_big(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
@@ -500,7 +514,7 @@ def pair_bad_request(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
     check(px.connections == 1, "%d connections" % px.connections)
     check(px.s2c(GOAWAY) == [], "server sent GOAWAY after a request error")
     check(run.out.endswith(tree.files["/sub/page.html"]), "page body missing from stdout")
-    check(run.code == cli.exit_4xx, "exit %s, documented %s for a 4xx" % (run.code, cli.exit_4xx))
+    expect_exit(run, EXIT_4XX, "a 400 then a 200")
 
 
 def pair_wrong_id(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
@@ -508,14 +522,13 @@ def pair_wrong_id(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
     px = through_proxy(srv, "wrong_id")
     run = run_client(cli, px.port, ["/small.txt"])
     px.close()
-    expect_protocol_error(cli, run)
+    expect_protocol_error(run)
     check(tree.files["/small.txt"] not in run.out, "printed the body of a mismatched response")
 
 
 def pair_refused(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
     run = run_client(cli, free_port(), ["/small.txt"])
-    check(run.code == cli.exit_connect, "exit %s on connection refused, documented %s"
-          % (run.code, cli.exit_connect))
+    expect_exit(run, EXIT_FAILED, "connection refused")
 
 
 def pair_verbose(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
@@ -528,7 +541,7 @@ def pair_verbose(cli: ClientImpl, srv: RunningServer, tree: Tree) -> None:
 
 PAIR_TESTS = [
     ("200 small file, byte-exact", pair_small),
-    ("404 + documented exit code", pair_404),
+    ("404 -> §11 exit 4", pair_404),
     ("large file, >1 DATA frame", pair_big),
     ("body of exactly 2x16384", pair_exact),
     ("7 URLs over one connection", pair_keepalive),
@@ -821,14 +834,133 @@ def s_client_goaway_id(raw: Raw, tree: Tree) -> None:
     raw.expect_eof(5.0)
 
 
+def conn_error(*frames: bytes) -> Callable[[Raw, Tree], None]:
+    """Send these frames; expect 400 on ID 0, GOAWAY 0x01 and a close (§7)."""
+    def fn(raw: Raw, tree: Tree) -> None:
+        raw.sock.sendall(b"".join(frames))
+        raw.expect_conn_error()
+    return fn
+
+
+POST_OPEN = raw_frame(REQUEST, 0, 1, request_payload(b"/small.txt", method=POST))
+
+
+def s_goaway_in_body(raw: Raw, tree: Tree) -> None:
+    """§7: a GOAWAY while a body is open simply ends the connection."""
+    raw.sock.sendall(POST_OPEN + raw_frame(DATA, 0, 1, b"x")
+                     + raw_frame(GOAWAY, 0, 0, bh.encode_goaway(0, 0)))
+    raw.expect_eof(5.0)
+
+
+def s_response_opens_no_body(raw: Raw, tree: Tree) -> None:
+    """§6/§7: only a REQUEST opens a body, so the DATA after a RESPONSE is stray too."""
+    raw.send(RESPONSE, 0, 9, b"\x00\xc8")
+    raw.send(DATA, FLAG_END, 9, b"x")
+    raw.expect(9, 400)
+    raw.expect(9, 400)
+    raw.expect_still_open(tree)
+
+
+def cl(*values: bytes) -> bh.Headers:
+    return [("content-length", v) for v in values]
+
+
+def s_cl_body(values: List[bytes], body: bytes, status: int) -> Callable[[Raw, Tree], None]:
+    """GET carrying a body in DATA frames, with the given content-length copies."""
+    def fn(raw: Raw, tree: Tree) -> None:
+        raw.send(REQUEST, 0, 1, request_payload(b"/small.txt", headers=cl(*values)))
+        raw.send(DATA, 0, 1, body[:2])
+        raw.send(DATA, FLAG_END, 1, body[2:])
+        m = raw.expect(1, status)
+        if status == 200:
+            check(m.body == tree.files["/small.txt"], "wrong body")
+        raw.expect_still_open(tree)
+    return fn
+
+
+def s_head_status(path: bytes, status: int) -> Callable[[Raw, Tree], None]:
+    """§6: every response to HEAD, whatever its status, has END and no DATA."""
+    def fn(raw: Raw, tree: Tree) -> None:
+        raw.get(1, path, method=HEAD)
+        m = raw.expect(1, status)
+        check(bool(m.flags & FLAG_END) and not m.data_sizes, "HEAD %d response has DATA" % status)
+        raw.expect_still_open(tree)
+    return fn
+
+
+IMF_FIXDATE = (r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d\d (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+               r"\d{4} \d\d:\d\d:\d\d GMT$")
+
+
+def s_dates(raw: Raw, tree: Tree) -> None:
+    """§5.3: date and last-modified are IMF-fixdate."""
+    import re
+    raw.get(1, b"/small.txt")
+    m = raw.expect(1, 200)
+    for name in ("date", "last-modified"):
+        values = [v.decode("latin-1") for n, v in m.headers if n == name]
+        check(len(values) == 1, "%d %s headers" % (len(values), name))
+        check(re.match(IMF_FIXDATE, values[0]) is not None, "%s %r is not IMF-fixdate" % (name, values[0]))
+
+
+def s_content_types(raw: Raw, tree: Tree) -> None:
+    """§8: content-type follows the extension table."""
+    want = {b"/small.txt": b"text/plain; charset=utf-8",
+            b"/sub/page.html": b"text/html; charset=utf-8",
+            b"/big.bin": b"application/octet-stream"}
+    for rid, (path, ctype) in enumerate(want.items(), 1):
+        raw.get(rid, path, method=HEAD)
+        got = [v for n, v in raw.expect(rid, 200).headers if n == "content-type"]
+        check(got == [ctype], "%s: content-type %r, want %r" % (path.decode(), got, ctype))
+
+
+def s_idle_trickle(srv: RunningServer, tree: Tree) -> None:
+    """§2: bytes of a partial frame do not extend T (own server with T = 3 s)."""
+    own = RunningServer(srv.impl, tree.root, tree.base, idle=3)
+    own.start()
+    try:
+        sock = socket.create_connection((HOST, own.port), timeout=0.2)
+        frame = raw_frame(REQUEST, FLAG_END, 1, request_payload(b"/small.txt"))
+        start, got, sent = time.monotonic(), b"", 0
+        while time.monotonic() - start < 8 and len(got) < 13:
+            if sent < len(frame) and time.monotonic() - start >= sent * 0.8:
+                try:
+                    sock.sendall(frame[sent:sent + 1])
+                    sent += 1
+                except OSError:
+                    break
+            try:
+                data = sock.recv(64)
+                if not data:
+                    break
+                got += data
+            except socket.timeout:
+                pass
+        waited = time.monotonic() - start
+        sock.close()
+        check(len(got) >= 13 and got[2] == GOAWAY, "no GOAWAY within 8 s (got %r)" % got[:16])
+        check(bh.decode_goaway(got[8:13]) == (0, 0), "GOAWAY %s, want last-id 0 code 0"
+              % (bh.decode_goaway(got[8:13]),))
+        check(2.5 <= waited <= 4.5, "GOAWAY after %.1f s with T = 3 s" % waited)
+    finally:
+        own.stop()
+
+
 SERVER_TESTS = [
     ("HTTP/1.1 text -> conn error", srv_case(s_http1_text)),
     ("Length 16385 -> 400/0, GOAWAY", srv_case(s_too_long)),
     ("unknown type, Length 65535", srv_case(s_too_long_unknown)),
     ("DATA other ID in body", srv_case(s_conn_error_body)),
     ("REQUEST while body open", srv_case(s_request_in_body)),
-    ("REQUEST with ID 0", srv_case(request_error(request_payload(b"/small.txt"), rid=0))),
-    ("payload under 3 bytes", srv_case(request_error(b"\x01\x00"))),
+    ("RESPONSE same ID in body", srv_case(conn_error(POST_OPEN, raw_frame(RESPONSE, FLAG_END, 1, b"\x00\xc8")))),
+    ("REQUEST same ID in body", srv_case(conn_error(POST_OPEN, raw_frame(REQUEST, FLAG_END, 1, request_payload(b"/"))))),
+    ("GOAWAY in body: close", srv_case(s_goaway_in_body)),
+    ("REQUEST with ID 0", srv_case(conn_error(raw_frame(REQUEST, FLAG_END, 0, request_payload(b"/small.txt"))))),
+    ("REQUEST ID 0 without END", srv_case(conn_error(raw_frame(REQUEST, 0, 0, request_payload(b"/small.txt"))))),
+    ("RESPONSE with ID 0", srv_case(conn_error(raw_frame(RESPONSE, FLAG_END, 0, b"\x00\xc8")))),
+    ("DATA with ID 0", srv_case(conn_error(raw_frame(DATA, FLAG_END, 0, b"x")))),
+    ("payload of 2 bytes", srv_case(request_error(b"\x01\x00"))),
+    ("payload of 3 bytes", srv_case(request_error(b"\x01\x00\x01"))),
     ("unknown method 0x06", srv_case(request_error(b"\x06\x00\x01/"))),
     ("Path Length 0", srv_case(request_error(b"\x01\x00\x00"))),
     ("Path Length past payload", srv_case(request_error(b"\x01\x00\x09/small"))),
@@ -845,14 +977,28 @@ SERVER_TESTS = [
     ("literal name uppercase", srv_case(request_error(request_payload(b"/small.txt", headers=[]) + b"\x00\x03X-A\x00\x00"))),
     ("header value with CR", srv_case(request_error(request_payload(b"/small.txt", headers=[]) + b"\x01\x00\x02a\r"))),
     ("RESPONSE sent to server", srv_case(request_error(b"\x00\xc8", rid=9, ftype=RESPONSE))),
+    ("RESPONSE opens no body", srv_case(s_response_opens_no_body)),
     ("DATA with no open body", srv_case(request_error(b"stray", rid=11, ftype=DATA))),
     ("bad REQUEST w/ body -> 1x400", srv_case(s_bad_request_with_body)),
+    ("req c-l 5, no body -> 400", srv_case(request_error(request_payload(b"/small.txt", headers=cl(b"5"))))),
+    ("req c-l 'x' -> 400", srv_case(request_error(request_payload(b"/small.txt", headers=cl(b"x"))))),
+    ("req c-l empty -> 400", srv_case(request_error(request_payload(b"/small.txt", headers=cl(b""))))),
+    ("req c-l 20 digits -> 400", srv_case(request_error(request_payload(b"/small.txt", headers=cl(b"0" * 20))))),
+    ("req c-l copies 0,1 -> 400", srv_case(request_error(request_payload(b"/small.txt", headers=cl(b"0", b"1"))))),
+    ("req c-l 5, body 3 -> 400", srv_case(s_cl_body([b"5"], b"abc", 400))),
+    ("req c-l 3 = body -> 200", srv_case(s_cl_body([b"3"], b"abc", 200))),
+    ("req c-l 007 = body -> 200", srv_case(s_cl_body([b"007"], b"abcdefg", 200))),
+    ("req c-l 3,3 = body -> 200", srv_case(s_cl_body([b"3", b"3"], b"abc", 200))),
     ("unknown frames skipped", srv_case(s_unknown_frames)),
     ("IDs copied (0xffffffff,5,3)", srv_case(s_ids_copied)),
     ("unused flag bits ignored", srv_case(s_flag_bits)),
     ("literal form of table names", srv_case(s_literal_headers)),
     ("empty header block", srv_case(s_no_headers)),
     ("HEAD: END, no DATA, c-l", srv_case(s_head)),
+    ("HEAD 404: END, no DATA", srv_case(s_head_status(b"/nope", 404))),
+    ("HEAD 301: END, no DATA", srv_case(s_head_status(b"/sub", 301))),
+    ("date, last-modified IMF-fixdate", srv_case(s_dates)),
+    ("content-type per §8 table", srv_case(s_content_types)),
     ("POST + body -> 405, allow", srv_case(s_405)),
     ("/sub -> 301 location /sub/", srv_case(path_status(b"/sub", 301, location=b"/sub/"))),
     ("/sub/ -> index.html", srv_case(path_status(b"/sub/", 200, "/sub/index.html"))),
@@ -872,6 +1018,7 @@ SERVER_TESTS = [
     ("truncated frame -> close", srv_case(s_truncated)),
     ("client GOAWAY -> close", srv_case(s_client_goaway)),
     ("GOAWAY ID 7 ignored -> close", srv_case(s_client_goaway_id)),
+    ("partial frame doesn't extend T", s_idle_trickle),
 ]
 SLOW_SERVER_TESTS = [("idle close with GOAWAY 0x00", srv_case(s_idle))]
 
@@ -954,14 +1101,19 @@ BODY = b"scripted body\n"
 
 
 def scripted(script: Script, paths: Optional[List[str]] = None,
-             check_run: Optional[Callable[[ClientRun, ScriptedServer], None]] = None):
+             check_run: Optional[Callable[[ClientRun, ScriptedServer], None]] = None,
+             urls: Optional[Callable[[int], List[str]]] = None):
+    """Run a client against a ScriptedServer; `urls` gives literal URLs instead of paths."""
     def run(cli: ClientImpl, tree: Tree) -> None:
         srv = ScriptedServer(script)
         try:
-            r = run_client(cli, srv.port, paths or ["/x"])
+            if urls:
+                r = run_argv(cli.argv(False, urls(srv.port)))
+            else:
+                r = run_client(cli, srv.port, paths or ["/x"])
         finally:
             srv.close()
-        (check_run or (lambda r, s: expect_protocol_error(cli, r)))(r, srv)
+        (check_run or (lambda r, s: expect_protocol_error(r)))(r, srv)
     return run
 
 
@@ -1080,7 +1232,7 @@ def expect_no_second_request(r: ClientRun, s: ScriptedServer) -> None:
     check([f.rid for f in s.requests] == [1], "requests sent: IDs %s, want only 1"
           % [f.rid for f in s.requests])
     check(r.out == BODY, "stdout %r, want the first body" % short(r.out))
-    check(r.code != 0, "exit 0 although the second URL was never fetched")
+    expect_exit(r, EXIT_FAILED, "a GOAWAY before the second request")
 
 
 def expect_body(want: bytes) -> Callable[[ClientRun, ScriptedServer], None]:
@@ -1111,6 +1263,59 @@ def expect_status_error(r: ClientRun, s: ScriptedServer) -> None:
     check(r.code != 0, "exit 0")
 
 
+def c_statuses(*codes: int) -> Script:
+    """Answer request n with codes[n-1], no body."""
+    def s(sock, reader, req):
+        code = codes[(req.rid - 1) % len(codes)]
+        send(sock, raw_frame(RESPONSE, FLAG_END, req.rid, struct.pack("!H", code)))
+    return s
+
+
+def c_lengths(values: List[bytes], body: bytes) -> Script:
+    def s(sock, reader, req):
+        hdrs = bh.encode_headers([("content-length", v) for v in values])
+        send(sock, raw_frame(RESPONSE, 0, req.rid, b"\x00\xc8" + hdrs),
+             raw_frame(DATA, FLAG_END, req.rid, body))
+    return s
+
+
+def c_close_after_first(sock, reader, req):
+    send(sock, ok_response(req.rid, BODY))
+    sock.shutdown(socket.SHUT_RDWR)
+    raise ConnectionAbortedError("scripted close")  # ends this connection
+
+
+def expect_code(code: int, what: str, conns: Optional[int] = None,
+                out: Optional[bytes] = None) -> Callable[[ClientRun, ScriptedServer], None]:
+    def fn(r: ClientRun, s: ScriptedServer) -> None:
+        expect_exit(r, code, what)
+        if conns is not None:
+            check(s.connections == conns, "%d connections, want %d" % (s.connections, conns))
+        if out is not None:
+            check(r.out == out, "stdout %r, want %r" % (r.out[:40], out[:40]))
+    return fn
+
+
+def expect_path(want: bytes) -> Callable[[ClientRun, ScriptedServer], None]:
+    """The raw Path of the first REQUEST (§11 URL grammar)."""
+    def fn(r: ClientRun, s: ScriptedServer) -> None:
+        check(bool(s.requests), "no REQUEST sent (exit %s; %s)" % (r.code, short(r.err)))
+        payload = s.requests[0].payload
+        (plen,) = struct.unpack_from("!H", payload, 1)
+        check(payload[3:3 + plen] == want, "sent path %r, want %r" % (payload[3:3 + plen], want))
+        expect_success(r, BODY + b"1")
+    return fn
+
+
+def url_case(suffix: str, want: bytes):
+    return scripted(c_good, check_run=expect_path(want),
+                    urls=lambda port: ["bhttp://%s:%d%s" % (HOST, port, suffix)])
+
+
+def usage_case(make_args: Callable[[int], List[str]]):
+    return scripted(c_good, check_run=expect_code(EXIT_USAGE, "a usage error", conns=0), urls=make_args)
+
+
 CLIENT_TESTS = [
     ("IDs 1,2,3, one conn, host", scripted(c_good, ["/a", "/b/c", "/d?x=1"], expect_ids)),
     ("unknown frames + flag bits", scripted(c_unknown_everywhere, None, expect_body(BODY))),
@@ -1127,11 +1332,35 @@ CLIENT_TESTS = [
     ("content-length not digits", scripted(c_cl_not_digits)),
     ("EOF before END", scripted(c_eof_before_end)),
     ("EOF inside a frame", scripted(c_eof_mid_frame)),
-    ("GOAWAY before END", scripted(c_goaway_before_end)),
+    ("GOAWAY before END -> 2", scripted(c_goaway_before_end)),
     ("Length 16385", scripted(c_too_long)),
     ("second RESPONSE", scripted(c_second_response)),
     ("REQUEST from server", scripted(c_request_from_server)),
     ("malformed header block", scripted(c_bad_header_block)),
+    ("c-l copies 2,3 -> 2", scripted(c_lengths([b"2", b"3"], b"ab"))),
+    ("c-l 20 digits -> 2", scripted(c_lengths([b"0" * 19 + b"2"], b"ab"))),
+    ("c-l empty -> 2", scripted(c_lengths([b""], b""))),
+    ("c-l 007 = 7 bytes -> 0", scripted(c_lengths([b"007"], b"1234567"), None, expect_body(b"1234567"))),
+    ("c-l 2,2 = 2 bytes -> 0", scripted(c_lengths([b"2", b"2"], b"ab"), None, expect_body(b"ab"))),
+    ("§11 exit: 301 -> 0", scripted(c_statuses(301), ["/a"], expect_code(EXIT_OK, "a 301"))),
+    ("§11 exit: 500 -> 5", scripted(c_statuses(500), ["/a"], expect_code(EXIT_5XX, "a 500"))),
+    ("§11 exit: 200,404 -> 4", scripted(c_statuses(200, 404), ["/a", "/b"], expect_code(EXIT_4XX, "200 then 404"))),
+    ("§11 exit: 404,500 -> 5", scripted(c_statuses(404, 500), ["/a", "/b"], expect_code(EXIT_5XX, "404 then 500"))),
+    ("§11 exit: 500,404 -> 5", scripted(c_statuses(500, 404), ["/a", "/b"], expect_code(EXIT_5XX, "500 then 404"))),
+    ("§11 exit: 2 beats 4 (404, bad)", scripted(c_statuses(404, 199), ["/a", "/b"],
+                                                 expect_code(EXIT_FAILED, "404 then a protocol error"))),
+    ("§11: closed, never reopened", scripted(c_close_after_first, ["/a", "/b"],
+                                              expect_code(EXIT_FAILED, "a close between requests", conns=1, out=BODY))),
+    ("§11 URL: #fragment not sent", url_case("/x#frag", b"/x")),
+    ("§11 URL: host:port?q -> /?q", url_case("?q=1", b"/?q=1")),
+    ("§11 URL: host:port -> /", url_case("", b"/")),
+    ("§11 URL: host:port#f -> /", url_case("#f", b"/")),
+    ("§11 URL: path sent unchanged", url_case("/a/../b%2e?x#y", b"/a/../b%2e?x")),
+    ("§11 usage: two origins -> 1", usage_case(lambda p: [_url(p, "/a"), _url(p + 1, "/b")])),
+    ("§11 usage: http:// -> 1", usage_case(lambda p: ["http://%s:%d/a" % (HOST, p)])),
+    ("§11 usage: bad port -> 1", usage_case(lambda p: ["%s:%dx/a" % (HOST, p)])),
+    ("§11 usage: unknown option -> 1", usage_case(lambda p: ["-Q", _url(p, "/a")])),
+    ("§11 usage: no URL -> 1", usage_case(lambda p: [])),
 ]
 
 
@@ -1203,19 +1432,6 @@ REF_TESTS = [
 # 4. Observed behaviour where SPEC.md is silent (no verdict, just the facts)
 # ---------------------------------------------------------------------------
 
-def obs_server_status(path: bytes, headers: bh.Headers, show: str = "") -> Callable[[RunningServer], str]:
-    def fn(srv: RunningServer) -> str:
-        raw = Raw(srv.port)
-        try:
-            raw.get(1, path, headers=headers)
-            m = raw.message()
-        finally:
-            raw.close()
-        extra = [v.decode("latin-1") for n, v in m.headers if n == show]
-        return "%d%s" % (m.status, (" " + extra[0]) if extra else "")
-    return fn
-
-
 def obs_client(script: Script, path: str, url: Optional[Callable[[int], str]] = None,
                report: str = "exit") -> Callable[[ClientImpl], str]:
     def fn(cli: ClientImpl) -> str:
@@ -1236,31 +1452,39 @@ def obs_client(script: Script, path: str, url: Optional[Callable[[int], str]] = 
     return fn
 
 
-def c_two_lengths(sock, reader, req):
-    hdrs = bh.encode_headers([("content-length", b"2"), ("content-length", b"3")])
-    send(sock, raw_frame(RESPONSE, 0, req.rid, b"\x00\xc8" + hdrs), raw_frame(DATA, FLAG_END, req.rid, b"ab"))
+def obs_head_error(payload: bytes) -> Callable[[RunningServer], str]:
+    """Shape of a 400 answering a HEAD-coded REQUEST: END only, or a body in DATA?"""
+    def fn(srv: RunningServer) -> str:
+        raw = Raw(srv.port)
+        try:
+            raw.send(REQUEST, FLAG_END, 1, payload)
+            m = raw.message()
+        finally:
+            raw.close()
+        return "%d %s" % (m.status, "END, no DATA" if m.flags & FLAG_END else "+ %d B DATA" % len(m.body))
+    return fn
 
 
-def c_status_only(code: int) -> Script:
-    def s(sock, reader, req):
-        send(sock, raw_frame(RESPONSE, FLAG_END, req.rid, struct.pack("!H", code)))
-    return s
+def obs_cl_copies(values: List[bytes], body: bytes) -> Callable[[RunningServer], str]:
+    def fn(srv: RunningServer) -> str:
+        raw = Raw(srv.port)
+        try:
+            raw.send(REQUEST, 0, 1, request_payload(b"/small.txt", headers=cl(*values)))
+            raw.send(DATA, FLAG_END, 1, body)
+            return str(raw.message().status)
+        finally:
+            raw.close()
+    return fn
 
 
 OBS_SERVER = [
-    ("REQUEST c-l 5, no body", obs_server_status(b"/small.txt", [("content-length", b"5")])),
-    ("REQUEST c-l 'x'", obs_server_status(b"/small.txt", [("content-length", b"x")])),
+    ("HEAD /a/../b (bad path)", obs_head_error(request_payload(b"/a/../b", method=HEAD))),
+    ("HEAD with c-l 5, no body", obs_head_error(request_payload(b"/small.txt", method=HEAD, headers=cl(b"5")))),
+    ("req c-l copies 3, 03 (3 B)", obs_cl_copies([b"3", b"03"], b"abc")),
 ]
 OBS_CLIENT = [
-    ("exit code for a 404", obs_client(c_status_only(404), "/x")),
-    ("exit code for a 500", obs_client(c_status_only(500), "/x")),
-    ("exit code, protocol error", obs_client(c_wrong_id, "/x")),
-    ("exit code, refused", lambda cli: "exit %d" % run_client(cli, free_port(), ["/x"]).code),
-    ("two content-lengths 2,3", obs_client(c_two_lengths, "/x")),
-    ("URL /x#frag sends path", obs_client(c_good, "/x#frag", report="path")),
-    ("URL host:port?q sends path", obs_client(c_good, "", report="path",
-                                              url=lambda port: "bhttp://%s:%d?q=1" % (HOST, port))),
-    ("URL /a/../b sends path", obs_client(c_good, "/a/../b", report="path")),
+    ("URL too long for one frame", obs_client(c_good, "/" + "a" * 16400)),
+    ("resp c-l copies 2, 02 (2 B)", obs_client(c_lengths([b"2", b"02"], b"ab"), "/x")),
 ]
 
 
