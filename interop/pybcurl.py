@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
-"""pybcurl [-v] URL...: a bhttp/1 client written from SPEC.md.
+"""pybcurl [-v] [-t seconds] URL...: a bhttp/1 client written from SPEC.md.
 
 Follows the reference-client contract of SPEC.md §11.  URL is
 [bhttp://]host[:port][path]; the port defaults to 9000; the host ends at the
 first ':', '/', '?' or '#'; a #fragment is never sent; an empty path becomes
 '/' and a path starting with '?' gets a '/' in front.  All URLs must name the
 same host and port; they are fetched in order over one connection (IDs 1, 2,
-3, ...), which is never reopened.  Bodies go to stdout, in order.
+3, ...), which is never reopened.  Bodies go to stdout, in order, and never
+past what content-length announced.  -t (default 30) gives up on a request after
+that long without a RESPONSE or DATA frame of it; unknown frames don't count.
 
 Exit status (the worst wins, in the order 2, 5, 4, 0):
   0  every response was 2xx or 3xx
   4  the worst response was 4xx
   5  the worst response was 5xx
-  2  connection or protocol error (later URLs are not fetched)
+  2  connection or protocol error, or timeout (later URLs are not fetched)
   1  usage error
 """
 
 import socket
 import sys
-from typing import BinaryIO, List, NamedTuple, Optional, Tuple
+import time
+from typing import BinaryIO, List, NamedTuple, Optional
 
 import pybhttp as bh
 from pybhttp import Frame
 
 DEFAULT_PORT = 9000
 USER_AGENT = b"pybcurl/1"
-USAGE = "usage: pybcurl [-v] URL...\n  URL: [bhttp://]host[:port][path]   (port defaults to 9000)"
+DEFAULT_TIMEOUT = 30
+USAGE = ("usage: pybcurl [-v] [-t seconds] URL...\n"
+         "  URL: [bhttp://]host[:port][path]   (port defaults to 9000)\n"
+         "  -t  give up after this long with no RESPONSE or DATA for a request (30)")
 
 EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_4XX, EXIT_5XX = 0, 1, 2, 4, 5
 
@@ -101,9 +107,10 @@ def request_frame(url: Url, rid: int) -> Frame:
 # --- one connection --------------------------------------------------------------
 
 class Client:
-    def __init__(self, verbose: bool, out: BinaryIO) -> None:
+    def __init__(self, verbose: bool, out: BinaryIO, timeout: int = DEFAULT_TIMEOUT) -> None:
         self.verbose = verbose
         self.out = out
+        self.timeout = timeout
         self.sock: Optional[socket.socket] = None
         self.reader: Optional[bh.FrameReader] = None
         self.next_id = 1
@@ -114,7 +121,7 @@ class Client:
 
     def connect(self, url: Url) -> None:
         try:
-            sock = socket.create_connection((url.host, url.port), timeout=60)
+            sock = socket.create_connection((url.host, url.port), timeout=self.timeout)
         except OSError as exc:
             raise Failure("cannot connect to %s port %d: %s" % (url.host, url.port, exc))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -143,7 +150,7 @@ class Client:
         """§4: no REQUEST may follow a GOAWAY, so read what arrived since the last END."""
         assert self.reader is not None
         while self.reader.pending():
-            frame = self.read_frame(skip_unknown=False)
+            frame = self.read_frame(time.monotonic() + self.timeout, skip_unknown=False)
             if frame is None:
                 raise Failure("server closed the connection")
             if frame.type == bh.GOAWAY:
@@ -154,23 +161,25 @@ class Client:
                 raise Failure("protocol error: unexpected %s between responses"
                               % bh.KNOWN_TYPES[frame.type])
 
-    def read_frame(self, skip_unknown: bool = True) -> Optional[Frame]:
+    def read_frame(self, deadline: float, skip_unknown: bool = True) -> Optional[Frame]:
         assert self.reader is not None
         try:
-            return self.reader.read() if skip_unknown else self.reader.read_any()
+            return self.reader.read(deadline) if skip_unknown else self.reader.read_any(deadline)
         except (bh.FrameTooLarge, bh.TruncatedFrame) as exc:
             raise Failure("protocol error: %s" % exc)
         except bh.IdleTimeout:
-            raise Failure("no frame from the server for 60 s")
+            raise Failure("no RESPONSE or DATA from the server for %d s" % self.timeout)
 
-    def next_frame(self) -> Frame:
-        frame = self.read_frame()
+    def next_frame(self, deadline: float) -> Frame:
+        frame = self.read_frame(deadline)
         if frame is None:
             raise Failure("protocol error: connection closed before END")
         return frame
 
     def read_response(self, rid: int) -> int:
-        frame = self.next_frame()
+        # §11: only a RESPONSE or DATA of this request is progress; skipped unknown
+        # frames share the deadline, and anything else ends the request anyway.
+        frame = self.next_frame(time.monotonic() + self.timeout)
         self.check_common(frame, rid)
         if frame.type == bh.DATA:
             raise Failure("protocol error: DATA before RESPONSE")
@@ -182,10 +191,12 @@ class Client:
         received = 0
         done = frame.end
         while not done:
-            frame = self.next_frame()
+            frame = self.next_frame(time.monotonic() + self.timeout)
             self.check_common(frame, rid)
             if frame.type == bh.RESPONSE:
                 raise Failure("protocol error: second RESPONSE for id %d" % rid)
+            if declared is not None and received + len(frame.payload) > declared:
+                raise Failure("protocol error: body longer than content-length %d" % declared)
             self.out.write(frame.payload)
             received += len(frame.payload)
             done = frame.end
@@ -213,16 +224,35 @@ class Client:
 
 # --- command line ----------------------------------------------------------------
 
-def parse_args(argv: List[str]) -> Tuple[bool, List[Url]]:
-    verbose = False
+class Options(NamedTuple):
+    verbose: bool
+    timeout: int
+    urls: List[Url]
+
+
+def parse_timeout(text: str) -> int:
+    if not (text.isdigit() and 1 <= int(text) <= 3600):
+        raise UsageError("-t wants whole seconds from 1 to 3600, not %r" % text)
+    return int(text)
+
+
+def parse_args(argv: List[str]) -> Options:
+    verbose, timeout = False, DEFAULT_TIMEOUT
     args = list(argv)
     while args and args[0].startswith("-") and args[0] != "-":
         opt = args.pop(0)
         if opt == "--":
             break
-        if opt != "-v":
+        if opt == "-v":
+            verbose = True
+        elif opt == "-t":
+            if not args:
+                raise UsageError("-t needs a value")
+            timeout = parse_timeout(args.pop(0))
+        elif opt.startswith("-t"):
+            timeout = parse_timeout(opt[2:])
+        else:
             raise UsageError("unknown option %s" % opt)
-        verbose = True
     if not args:
         raise UsageError("no URL")
     urls = [parse_url(a) for a in args]
@@ -232,7 +262,7 @@ def parse_args(argv: List[str]) -> Tuple[bool, List[Url]]:
                              % (urls[0].host, urls[0].port))
     for url in urls:
         request_frame(url, 1)  # too long for one frame: refuse before connecting
-    return verbose, urls
+    return Options(verbose, timeout, urls)
 
 
 def exit_for(status: int) -> int:
@@ -241,12 +271,12 @@ def exit_for(status: int) -> int:
 
 def main(argv: List[str]) -> int:
     try:
-        verbose, urls = parse_args(argv)
+        verbose, timeout, urls = parse_args(argv)
     except UsageError as exc:
         print("pybcurl: %s\n%s" % (exc, USAGE), file=sys.stderr)
         return EXIT_USAGE
 
-    client = Client(verbose, sys.stdout.buffer)
+    client = Client(verbose, sys.stdout.buffer, timeout)
     worst = EXIT_OK
     try:
         client.connect(urls[0])
