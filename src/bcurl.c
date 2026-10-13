@@ -1,7 +1,7 @@
 /*
  * bcurl - fetch URLs over bhttp/1.
  *
- *     bcurl [-v] URL [URL...]
+ *     bcurl [-v] [-t seconds] URL [URL...]
  *
  * URL is [bhttp://]host[:port][/path] (port 9000 if omitted). All URLs must
  * name the same host and port: they are fetched in order over ONE TCP
@@ -32,7 +32,10 @@
 
 #define CLIENT_NAME "bcurl/1.0"
 #define DEFAULT_PORT "9000"
-#define TIMEOUT_MS 30000
+#define DEFAULT_TIMEOUT_S 30
+
+/* -t: how long to wait for progress on a request (SPEC 11) */
+static int64_t timeout_ms = DEFAULT_TIMEOUT_S * 1000;
 
 enum {
     EXIT_OK = 0,
@@ -332,6 +335,9 @@ static int on_data(const struct client *c, const struct url *u, uint32_t id,
         return protocol_error(u, "DATA before RESPONSE");
     if (h->id != id)
         return protocol_error(u, "DATA for another request ID");
+    /* never write a byte past what content-length announced (r->body <= it) */
+    if (r->have_length && h->length > r->content_length - r->body)
+        return protocol_error(u, "body longer than content-length");
     if (h->length > 0 &&
         io_write_full(STDOUT_FILENO, c->rx + BH_HEADER_LEN, h->length) != BH_IO_OK) {
         fprintf(stderr, "bcurl: writing to stdout: %s\n", strerror(errno));
@@ -372,6 +378,8 @@ static int on_frame(const struct client *c, const struct url *u, uint32_t id,
  */
 static int check_between_requests(struct client *c, const struct url *next)
 {
+    int64_t deadline = io_now_ms() + timeout_ms;   /* a stream of unknown frames ends too */
+
     for (;;) {
         struct pollfd pfd;
         struct bh_header h;
@@ -383,7 +391,7 @@ static int check_between_requests(struct client *c, const struct url *next)
         pfd.revents = 0;
         if (poll(&pfd, 1, 0) <= 0)
             return 0;   /* nothing pending */
-        rc = bh_read_frame(c->fd, c->rx, &h, io_now_ms() + TIMEOUT_MS);
+        rc = bh_read_frame(c->fd, c->rx, &h, deadline);
         if (rc == BH_IO_EOF) {
             fprintf(stderr, "bcurl: %s: server closed the connection\n", next->text);
             return -1;
@@ -406,10 +414,15 @@ static int check_between_requests(struct client *c, const struct url *next)
     }
 }
 
-/* Fetches one URL on the open connection. Returns 0 with *status set, or -1. */
+/*
+ * Fetches one URL on the open connection. Returns 0 with *status set, or -1.
+ * SPEC 11: give up after timeout_ms without a RESPONSE or DATA frame for
+ * this request; unknown frames are skipped but do not extend the wait.
+ */
 static int fetch(struct client *c, const struct url *u, uint32_t id, unsigned *status)
 {
     struct reply r;
+    int64_t deadline;
     int done = 0;
 
     memset(&r, 0, sizeof r);
@@ -417,9 +430,10 @@ static int fetch(struct client *c, const struct url *u, uint32_t id, unsigned *s
         return -1;
     if (send_request(c, u, id) != 0)
         return -1;
+    deadline = io_now_ms() + timeout_ms;
     while (!done) {
         struct bh_header h;
-        int rc = bh_read_frame(c->fd, c->rx, &h, io_now_ms() + TIMEOUT_MS);
+        int rc = bh_read_frame(c->fd, c->rx, &h, deadline);
 
         if (rc != BH_IO_OK) {
             if (c->verbose && rc == BH_IO_TOOBIG)
@@ -432,6 +446,8 @@ static int fetch(struct client *c, const struct url *u, uint32_t id, unsigned *s
         done = on_frame(c, u, id, &h, &r);
         if (done < 0)
             return -1;
+        if (h.type == BH_RESPONSE || h.type == BH_DATA)   /* progress on this request */
+            deadline = io_now_ms() + timeout_ms;
     }
     if (r.have_length && r.body != r.content_length) {
         fprintf(stderr, "bcurl: %s: protocol error: body is %llu bytes, content-length says %llu\n",
@@ -471,10 +487,12 @@ static int worse(int a, int b)
 
 static void usage(void)
 {
-    fputs("usage: bcurl [-v] URL [URL...]\n"
-          "  URL: [bhttp://]host[:port][/path]   (port defaults to " DEFAULT_PORT ")\n"
+    fputs("usage: bcurl [-v] [-t seconds] URL [URL...]\n"
+          "  URL: [bhttp://]host[:port][path]   host: name, IPv4, or [IPv6]; port "
+          DEFAULT_PORT " by default\n"
           "  every URL must name the same host and port; one connection is used for all\n"
           "  -v  hexdump every frame sent (>) and received (<) on stderr\n"
+          "  -t  give up after this long with no RESPONSE or DATA for a request (30)\n"
           "exit: 0 2xx/3xx, 4 4xx, 5 5xx, 2 connection or protocol error, 1 usage\n",
           stderr);
 }
@@ -489,10 +507,18 @@ int main(int argc, char **argv)
     int result = EXIT_OK;
     int opt;
 
-    while ((opt = getopt(argc, argv, "vh")) != -1) {
+    while ((opt = getopt(argc, argv, "vt:h")) != -1) {
         if (opt == 'v') {
             verbose = 1;
             continue;
+        }
+        if (opt == 't') {
+            char *end;
+            long v = strtol(optarg, &end, 10);
+            if (*optarg != '\0' && *end == '\0' && v >= 1 && v <= 3600) {
+                timeout_ms = (int64_t)v * 1000;
+                continue;
+            }
         }
         usage();
         return opt == 'h' ? EXIT_OK : EXIT_USAGE;

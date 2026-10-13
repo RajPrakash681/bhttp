@@ -106,6 +106,8 @@ class TestAgainstBserve(harness.SiteServerCase, unittest.TestCase):
         self.assertEqual(harness.run_bcurl("127.0.0.1:99999/")[0], 1)
         self.assertEqual(harness.run_bcurl("127.0.0.1:x/")[0], 1)
         self.assertEqual(harness.run_bcurl("-h")[0], 0)
+        self.assertEqual(harness.run_bcurl("-t", "0", "127.0.0.1:9/")[0], 1)
+        self.assertEqual(harness.run_bcurl("-t", "x", "127.0.0.1:9/")[0], 1)
 
 
 def reply(status, body=b"", fields=(), rid_override=None, end_on_response=None):
@@ -263,6 +265,36 @@ class TestAgainstFakeServer(unittest.TestCase):
         with harness.FakeServer(scripted([first, reply(200, b"two")])) as fake:
             rc, out, _ = self.fetch(fake, "/1", "/2")
         self.assertEqual((rc, out), (0, b"onetwo"))
+
+    def test_never_writes_past_content_length(self):
+        def overrun(rid):
+            return (w.frame(w.RESPONSE, 0, rid, b"\x00\xc8" +
+                            w.header_block([("content-length", "5")])) +
+                    w.frame(w.DATA, 0, rid, b"abc") +
+                    w.frame(w.DATA, 0, rid, b"x" * w.MAX_PAYLOAD) +
+                    w.frame(w.DATA, w.END, rid, b"y" * w.MAX_PAYLOAD))
+        with harness.FakeServer(scripted([overrun])) as fake:
+            rc, out, err = self.fetch(fake, "/")
+        self.assertEqual((rc, out), (2, b"abc"))   # nothing beyond the 5 announced bytes
+        self.assertIn("longer than content-length", err)
+
+    def test_unknown_frames_do_not_extend_the_wait(self):
+        def trickle(conn):
+            if w.read_frame(conn) is None:
+                return
+            try:
+                for _ in range(100):               # an unknown frame every 0.3 s
+                    conn.sendall(w.frame(0x42, 0, 0, b"still here"))
+                    time.sleep(0.3)
+            except OSError:
+                pass                               # bcurl gave up and closed
+        with harness.FakeServer(trickle) as fake:
+            start = time.time()
+            rc, _, err = harness.run_bcurl("-t", "1", "127.0.0.1:%d/" % fake.port)
+            elapsed = time.time() - start
+        self.assertEqual(rc, 2)
+        self.assertIn("timed out", err)
+        self.assertLess(elapsed, 5)
 
     def test_connection_refused_exits_2(self):
         s = socket.socket()
