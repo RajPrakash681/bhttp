@@ -136,33 +136,29 @@ The symlink-swap race fixed in 4f2578d is covered by the project's own
 under ASan/UBSan) and here by `fuzz_mappath.c`, which checks that the opened
 descriptor is the inode `realpath` named.
 
-## Findings
+## Findings and their status
 
-1. **Search-only directories (regression in 4f2578d).** `open_beneath`
-   opens every directory on the way with `O_RDONLY | O_DIRECTORY`
-   (`src/bserve.c:329`), and `main` opens ROOT the same way
-   (`src/bserve.c:889`). Both need *read* permission; path lookup only ever
-   needed *search*. With a subdirectory at mode 0311, `/pub/file.txt` was 200
-   on 633e106 and is 403 on 7ce6503, and `/pub` went from 301 to 403. With
-   ROOT at 0311, bserve no longer starts at all. Fix: open directories with
-   `O_SEARCH` where it exists (`O_PATH` on Linux), falling back to
-   `O_RDONLY`, and decide directory vs. file for the last component with
-   `fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW)` before opening it.
-2. **bcurl streams past `content-length`.** `on_data` writes every DATA
-   payload to stdout (`src/bcurl.c:336`), and the body is compared with
-   `content-length` only after END (`src/bcurl.c:436`). A server that
-   declares 5 bytes and sends 20 MiB gets all 20,971,520 bytes onto stdout
-   before bcurl reports the error and exits 2 (measured; the `overrun`
-   scenario in `netfuzz.py client` checks for it). Fix: fail in `on_data` as soon as
-   `r->body + h->length > r->content_length`.
-3. **bcurl has no overall deadline.** Every frame read gets a fresh 30 s
-   deadline (`src/bcurl.c:386`, `src/bcurl.c:422`). Unknown frames must be
-   skipped (SPEC 4), so a server sending one every few seconds keeps bcurl
-   waiting indefinitely: it waited 70.7 s and left only because the test
-   server closed. bserve got the matching fix in 08538fe (only requests
-   extend T). Fix: give the response a total deadline, or reset the deadline
-   only on RESPONSE and DATA for the current ID.
-4. **Cap without per-peer fairness (by design, low).** With the cap at 64
-   (`src/bserve.c:924`), one client holding 64 connections and sending a
-   REQUEST every 29 s gets everyone else refused with GOAWAY BUSY. That trade
-   is reasonable for a course server but worth a sentence in the README.
+All four were reported against 7ce6503 and are resolved on main. Each fix has a
+regression test in `tests/`, and the checks that found them were re-run on
+d98fb56 (see [Re-check after the fixes](#re-check-after-the-fixes)).
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | **Search-only directories (regression in 4f2578d).** Directories on the path, and ROOT itself, were opened with `O_RDONLY \| O_DIRECTORY`, which needs *read* permission where path lookup only needs *search*. A subdirectory at mode 0311 turned `/pub/file.txt` from 200 into 403 and `/pub` from 301 into 403; a ROOT at 0311 stopped bserve from starting. | **Fixed in 56c6e6e.** Directories are opened for search only (`O_SEARCH` / `O_PATH`, falling back to `O_RDONLY`), the last component is checked with `fstatat(..., AT_SYMLINK_NOFOLLOW)`, and only a regular file is opened. Test: `test_search_only_directory`, `TestSearchOnlyRoot`. |
+| 2 | **bcurl wrote past `content-length`.** Every DATA payload went to stdout and the length was compared only after END: a server declaring 5 bytes and sending 20 MiB got all 20,971,520 bytes onto stdout before exit 2. | **Fixed in 2f7e679.** bcurl fails before writing anything beyond the declared length. Test: `test_never_writes_past_content_length`. |
+| 3 | **bcurl had no overall deadline.** Every frame read got a fresh 30 s deadline, so a server sending an unknown frame every few seconds kept bcurl waiting indefinitely (70.7 s in the test). | **Fixed in 2f7e679.** Only a RESPONSE or DATA for the current request resets the wait (`-t`, default 30 s), matching bserve's rule from 08538fe. Test: `test_unknown_frames_do_not_extend_the_wait`. |
+| 4 | **The connection cap has no per-peer fairness (by design, low).** One client holding all 64 slots gets everyone else refused with GOAWAY BUSY. | **Documented** in the README (bserve section). Accepted for a course server. |
+
+## Re-check after the fixes
+
+Run on d98fb56, which contains all four fixes:
+
+| Check | Result |
+|---|---|
+| libFuzzer `mappath`, 90 s (the path code rewritten by 56c6e6e) | 38,060,303 execs, cov 69, 0 crashes or sanitizer reports |
+| libFuzzer `server`, 90 s | 571,930 execs, cov 279, 0 crashes or sanitizer reports |
+| libFuzzer `client`, 90 s (the bcurl code changed by 2f7e679) | 566,337 execs, cov 266, 0 crashes or sanitizer reports |
+| `netfuzz.py checks` | 0 findings, including ROOT and a subdirectory at 0311 |
+| `netfuzz.py client --cases 200 --seed 4242` | 88 bcurl runs, 0 findings, including the 20 MiB `overrun` scenario |
+| `netfuzz.py slow` | bcurl exits 2 after 30.1 s against both the drip and the keepalive server |
+| `conn_flood.py` | PASS: 200 connections, peak 64 processes, requests answered during and after the flood |
