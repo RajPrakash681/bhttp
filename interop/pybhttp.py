@@ -248,13 +248,19 @@ def header_values(headers: Headers, name: str) -> List[bytes]:
 
 
 def content_length(headers: Headers) -> Optional[int]:
-    """The declared body length, None if absent; Malformed if not usable (§6)."""
+    """The declared body length, None if absent (§6).
+
+    Malformed unless every copy is the same 1 to 19 ASCII digits.
+    """
     values = header_values(headers, "content-length")
     if not values:
         return None
-    if len(set(values)) != 1 or not values[0].isdigit():
-        raise Malformed("bad content-length %r" % values)
-    return int(values[0])
+    if len(set(values)) != 1:
+        raise Malformed("content-length copies differ: %r" % values)
+    value = values[0]
+    if not (1 <= len(value) <= 19 and value.isdigit()):
+        raise Malformed("content-length %r is not 1-19 digits" % value)
+    return int(value)
 
 
 # --- §5.1 REQUEST ----------------------------------------------------------
@@ -274,8 +280,8 @@ def encode_request(method: int, path: bytes, headers: Headers) -> bytes:
 
 
 def decode_request(payload: bytes) -> Tuple[int, bytes, Headers]:
-    if len(payload) < 3:
-        raise Malformed("REQUEST payload under 3 bytes")
+    if len(payload) < 4:
+        raise Malformed("REQUEST payload under 4 bytes")
     method, plen = struct.unpack_from("!BH", payload, 0)
     if method not in METHODS:
         raise Malformed("unknown method 0x%02x" % method)

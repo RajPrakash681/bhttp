@@ -24,12 +24,13 @@ DEFAULT_IDLE = 30.0
 DRAIN_SECONDS = 2.0
 ALLOWED = b"GET, HEAD"
 
-CONTENT_TYPES = {
-    b".html": b"text/html", b".htm": b"text/html", b".txt": b"text/plain",
-    b".css": b"text/css", b".js": b"text/javascript", b".json": b"application/json",
-    b".png": b"image/png", b".jpg": b"image/jpeg", b".jpeg": b"image/jpeg",
-    b".gif": b"image/gif", b".svg": b"image/svg+xml", b".pdf": b"application/pdf",
-    b".ico": b"image/x-icon", b".xml": b"application/xml", b".wasm": b"application/wasm",
+UTF8 = b"; charset=utf-8"
+CONTENT_TYPES = {  # the table in §8
+    b".html": b"text/html" + UTF8, b".htm": b"text/html" + UTF8, b".css": b"text/css" + UTF8,
+    b".js": b"text/javascript" + UTF8, b".txt": b"text/plain" + UTF8,
+    b".md": b"text/markdown" + UTF8, b".json": b"application/json", b".png": b"image/png",
+    b".jpg": b"image/jpeg", b".jpeg": b"image/jpeg", b".gif": b"image/gif",
+    b".svg": b"image/svg+xml", b".ico": b"image/x-icon", b".pdf": b"application/pdf",
 }
 
 _log_lock = threading.Lock()
@@ -99,7 +100,7 @@ class Connection:
                       body: bytes = b"", head_only: bool = False) -> None:
         base: Headers = [("date", http_date(time.time())), ("server", SERVER_NAME)]
         if body:
-            base += [("content-type", b"text/plain"),
+            base += [("content-type", b"text/plain" + UTF8),
                      ("content-length", str(len(body)).encode())]
         payload = bh.encode_response(status, base + headers)
         if head_only or not body:
@@ -150,6 +151,8 @@ class Connection:
             raise PeerGone()
 
     def dispatch(self, frame: Frame) -> None:
+        if frame.rid == 0 and frame.type in (bh.REQUEST, bh.RESPONSE, bh.DATA):
+            raise ConnError("%s with ID 0" % bh.KNOWN_TYPES[frame.type])
         if frame.type == bh.REQUEST:
             self.handle_request(frame)
         elif frame.type == bh.RESPONSE:
@@ -159,9 +162,9 @@ class Connection:
         elif frame.type == bh.GOAWAY:
             raise PeerGone()
 
-    def request_error(self, rid: int, reason: str) -> None:
+    def request_error(self, rid: int, reason: str, head_only: bool = False) -> None:
         log("400 id=%d: %s" % (rid, reason))
-        self.send_error(rid, 400, "Bad Request: " + reason)
+        self.send_error(rid, 400, "Bad Request: " + reason, head_only)
         self.last_answered = rid
 
     # requests
@@ -185,16 +188,15 @@ class Connection:
     def handle_request(self, frame: Frame) -> None:
         body = b"" if frame.end else self.read_body(frame.rid)
         rid = frame.rid
-        if rid == 0:
-            return self.request_error(0, "REQUEST with ID 0")
+        head_only = frame.payload[:1] == bytes([bh.METHOD_CODES["HEAD"]])  # §6: no body
         try:
             method, path, headers = bh.decode_request(frame.payload)
             declared = bh.content_length(headers)
         except bh.Malformed as exc:
-            return self.request_error(rid, str(exc))
+            return self.request_error(rid, str(exc), head_only)
         if declared is not None and declared != len(body):
             return self.request_error(rid, "content-length %d but body is %d bytes"
-                                      % (declared, len(body)))
+                                      % (declared, len(body)), head_only)
         name = bh.METHODS[method]
         log("%s %s id=%d" % (name, path.decode("latin-1"), rid))
         if name not in ("GET", "HEAD"):
