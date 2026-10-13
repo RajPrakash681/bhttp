@@ -10,7 +10,12 @@ PYTHON  ?= python3
 
 WARNINGS = -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wformat=2 \
            -Wstrict-prototypes -Wmissing-prototypes -Wvla
-BASE     = -std=c11 -D_XOPEN_SOURCE=700 $(WARNINGS)
+FEATURES = -D_XOPEN_SOURCE=700
+ifeq ($(shell uname -s),Darwin)
+# macOS hides some POSIX 2008 names (O_NOFOLLOW) under strict _XOPEN_SOURCE
+FEATURES += -D_DARWIN_C_SOURCE
+endif
+BASE     = -std=c11 $(FEATURES) $(WARNINGS)
 RELEASE  = $(BASE) -O2
 DEBUG    = $(BASE) -O1 -g -fno-omit-frame-pointer \
            -fsanitize=address,undefined -fno-sanitize-recover=all

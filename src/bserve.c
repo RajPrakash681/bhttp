@@ -50,6 +50,7 @@
 struct config {
     char root[PATH_MAX];   /* realpath of ROOT */
     size_t root_len;
+    int root_fd;           /* ROOT itself, opened once at startup */
     int idle_ms;
 };
 
@@ -298,18 +299,76 @@ static int has_hidden_segment(const uint8_t *path, size_t len)
 }
 
 /*
- * Maps the path part of a request (no query) to a regular file under ROOT.
- * Returns 0 with the resolved name in `real`, or the HTTP status to send.
+ * Opens `rel`, a path relative to ROOT as realpath() produced it (no ".",
+ * "..", empty or symlink components), one component at a time from the ROOT
+ * descriptor, never following a symbolic link. If the tree changed after
+ * realpath() looked at it (say, a directory was swapped for a symlink out of
+ * ROOT), this fails instead of following the link, so whatever it opens is
+ * inside ROOT. Returns a descriptor or -1 with errno set.
+ */
+static int open_beneath(int root_fd, const char *rel)
+{
+    int dir = root_fd;
+
+    if (*rel == '\0')
+        return openat(root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    for (;;) {
+        const char *slash = strchr(rel, '/');
+        size_t len = slash ? (size_t)(slash - rel) : strlen(rel);
+        char name[PATH_MAX];
+        int fd = -1;
+        int saved;
+
+        if (len == 0 || len >= sizeof name) {
+            errno = ENOENT;
+        } else {
+            memcpy(name, rel, len);
+            name[len] = '\0';
+            fd = openat(dir, name, slash ? O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                                         : O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        }
+        saved = errno;
+        if (dir != root_fd)
+            close(dir);
+        errno = saved;
+        if (fd < 0 || slash == NULL)
+            return fd;
+        dir = fd;
+        rel = slash + 1;
+    }
+}
+
+/*
+ * The status for a failed realpath() or open. EINVAL is what macOS realpath()
+ * reports when a symlink it saw is replaced while it reads it: a race, so 404.
+ */
+static unsigned status_for_errno(int err)
+{
+    if (err == EACCES)
+        return 403;
+    if (err == ENOENT || err == ENOTDIR || err == ELOOP || err == ENAMETOOLONG ||
+        err == EINVAL)
+        return 404;
+    return 500;
+}
+
+/*
+ * Maps the path part of a request (no query) to an open regular file under
+ * ROOT. Returns 0 with *fd, *st and `real` set, or the HTTP status to send.
  * The path has passed bh_path_check: it starts with '/', has no "." or ".."
  * segments and no NUL or other control bytes.
+ *
+ * realpath() resolves symlinks so that links inside ROOT work and links out
+ * of ROOT are refused; open_beneath() then opens what realpath() named
+ * without following anything, which closes the race between the two.
  */
-static unsigned map_path(const struct config *cfg, const uint8_t *path, size_t len,
-                         char real[PATH_MAX])
+static unsigned open_path(const struct config *cfg, const uint8_t *path, size_t len,
+                          int *fd, struct stat *st, char real[PATH_MAX])
 {
     char want[PATH_MAX];
     const char *suffix = path[len - 1] == '/' ? "index.html" : "";
     size_t slen = strlen(suffix);
-    struct stat st;
+    const char *rel;
 
     if (has_hidden_segment(path, len))
         return 404;
@@ -319,21 +378,22 @@ static unsigned map_path(const struct config *cfg, const uint8_t *path, size_t l
     memcpy(want + cfg->root_len, path, len);
     memcpy(want + cfg->root_len + len, suffix, slen + 1);
 
-    if (realpath(want, real) == NULL) {
-        if (errno == EACCES)
-            return 403;
-        if (errno == ENOENT || errno == ENOTDIR || errno == ENAMETOOLONG || errno == ELOOP)
-            return 404;
-        return 500;
-    }
+    if (realpath(want, real) == NULL)
+        return status_for_errno(errno);
     if (!inside_root(cfg, real))
         return 404;
-    if (stat(real, &st) != 0)
-        return errno == EACCES ? 403 : 404;
-    if (S_ISDIR(st.st_mode))
-        return slen > 0 ? 404 : 301;
-    if (!S_ISREG(st.st_mode))
-        return 404;
+    rel = real + cfg->root_len;
+    if (*rel == '/')
+        rel++;
+    *fd = open_beneath(cfg->root_fd, rel);
+    if (*fd < 0)
+        return status_for_errno(errno);
+    if (fstat(*fd, st) != 0 || !S_ISREG(st->st_mode)) {
+        unsigned status = S_ISDIR(st->st_mode) ? (slen > 0 ? 404 : 301) : 404;
+        close(*fd);
+        *fd = -1;
+        return status;
+    }
     return 0;
 }
 
@@ -441,13 +501,13 @@ static int serve_path(struct conn *c, struct exchange *ex, const uint8_t *path, 
 {
     char real[PATH_MAX];
     size_t plen = bh_path_part_len(path, len);   /* the query is ignored */
-    unsigned status = map_path(c->cfg, path, plen, real);
     struct stat st;
-    int fd;
+    int fd = -1;
+    unsigned status = open_path(c->cfg, path, plen, &fd, &st, real);
     int rc;
 
     if (status == 301) {
-        char location[PATH_MAX + 2];   /* map_path checked plen < PATH_MAX */
+        char location[PATH_MAX + 2];   /* open_path checked plen < PATH_MAX */
         struct field f = { "location", location };
         memcpy(location, path, plen);
         location[plen] = '/';
@@ -456,14 +516,7 @@ static int serve_path(struct conn *c, struct exchange *ex, const uint8_t *path, 
     }
     if (status != 0)
         return send_text(c, ex, status, NULL, NULL);
-
-    fd = open(real, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0)
-        return send_text(c, ex, errno == EACCES ? 403 : errno == ENOENT ? 404 : 500, NULL, NULL);
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))   /* it may have changed */
-        rc = send_text(c, ex, 404, NULL, NULL);
-    else
-        rc = send_file(c, ex, fd, &st, content_type(real));
+    rc = send_file(c, ex, fd, &st, content_type(real));
     close(fd);
     return rc;
 }
@@ -769,6 +822,11 @@ int main(int argc, char **argv)
         return 1;
     }
     cfg.root_len = strlen(cfg.root);
+    cfg.root_fd = open(cfg.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cfg.root_fd < 0) {
+        fprintf(stderr, "bserve: %s: %s\n", cfg.root, strerror(errno));
+        return 1;
+    }
     cfg.idle_ms = (int)idle * 1000;
 
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer is a write error, not a signal */

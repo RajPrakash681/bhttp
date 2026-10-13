@@ -3,6 +3,7 @@ import os
 import random
 import socket
 import struct
+import subprocess
 import sys
 import time
 import unittest
@@ -379,6 +380,46 @@ class TestPaths(ServerCase):
         for path in ("/../secret.txt", "/link-out", "//../secret.txt"):
             self.sock.sendall(w.request(1, path))
             self.assertNotIn(b"outside the root", w.read_response(self.sock, 1).body)
+
+
+# Atomically exchanges ROOT/swap (a directory) and ROOT/.swaplink (a symlink
+# out of the root), as fast as it can, for argv[2] seconds.
+SWAPPER = """
+import ctypes, os, sys, time
+libc = ctypes.CDLL(None, use_errno=True)
+root, end = sys.argv[1], time.time() + float(sys.argv[2])
+a, b = (os.path.join(root, n).encode() for n in ("swap", ".swaplink"))
+if sys.platform == "darwin":
+    exchange = lambda: libc.renamex_np(a, b, 2)            # RENAME_SWAP
+else:
+    exchange = lambda: libc.renameat2(-100, a, -100, b, 2)  # AT_FDCWD, RENAME_EXCHANGE
+while time.time() < end:
+    if exchange() != 0:
+        sys.exit("exchange failed: errno %d" % ctypes.get_errno())
+"""
+
+
+class TestSymlinkRace(ServerCase):
+
+    def test_symlink_swap_never_escapes_the_root(self):
+        """A directory swapped for a symlink between check and open must not leak."""
+        racer = subprocess.Popen([sys.executable, "-c", SWAPPER, self.root, "4"],
+                                 stderr=subprocess.PIPE)
+        statuses = {}
+        try:
+            rid = 0
+            while racer.poll() is None:
+                rid += 1
+                r = self.get("/swap/secret.txt", rid)
+                statuses[r.status] = statuses.get(r.status, 0) + 1
+                self.assertNotIn(b"outside the root", r.body,
+                                 "file outside ROOT served after %d requests" % rid)
+        finally:
+            err = racer.communicate()[1]
+        if racer.returncode != 0:
+            self.skipTest("no atomic rename exchange here: %s" % err.decode().strip())
+        self.assertEqual(set(statuses) - {200, 404}, set(), statuses)
+        self.assertGreater(statuses.get(200, 0), 0, statuses)   # the race really ran
 
 
 class TestRobustness(ServerCase):

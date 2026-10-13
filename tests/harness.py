@@ -62,6 +62,15 @@ def make_site(base):
         f.write("no permission\n")
     os.chmod(os.path.join(root, "noread.txt"), 0)
     os.symlink(os.path.join(base, "secret.txt"), os.path.join(root, "link-out"))
+    # for the symlink-swap race: /swap is a real directory and .swaplink a
+    # link out of the root, both holding a secret.txt; a racer exchanges them
+    os.mkdir(os.path.join(base, "outside"))
+    with open(os.path.join(base, "outside", "secret.txt"), "w") as f:
+        f.write("outside the root\n")
+    os.mkdir(os.path.join(root, "swap"))
+    with open(os.path.join(root, "swap", "secret.txt"), "w") as f:
+        f.write("inside the root\n")
+    os.symlink(os.path.join(base, "outside"), os.path.join(root, ".swaplink"))
     os.symlink("hello.txt", os.path.join(root, "link-in"))
     os.mkfifo(os.path.join(root, "fifo"))
     return root
