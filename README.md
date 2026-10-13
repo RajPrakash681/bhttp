@@ -112,7 +112,7 @@ the connection open.
 ## bserve
 
 ```
-bserve [-t idle_seconds] ROOT PORT
+bserve [-t idle_seconds] [-c max_connections] ROOT PORT
 ```
 
 - Listens on `0.0.0.0:PORT` with `SO_REUSEADDR`. `PORT` 0 picks a free port and the
@@ -120,14 +120,20 @@ bserve [-t idle_seconds] ROOT PORT
 - **One process per connection (`fork`).** A connection's state (two 16 KiB frame
   buffers and a file descriptor) lives in its own address space, so one connection cannot
   corrupt or crash another or the listener, and nothing needs a lock. A process per client
-  is an acceptable cost for this server. Children are reaped automatically
-  (`SIGCHLD` ignored).
-- Reads frames until the client closes, the connection is idle for 30 s (`-t` changes
-  this; the server then sends GOAWAY), or the framing breaks.
-- Maps `/` to `/index.html` (any path ending in `/` gets `index.html`), resolves the path
-  with `realpath` and refuses anything outside ROOT (404), refuses `..`, `.`, missing
-  leading `/` and control bytes (400), hides dot-files (404), and redirects a directory
-  without a trailing slash (301). Status codes: 200, 301, 400, 403, 404, 405, 500.
+  is an acceptable cost for this server.
+- **At most 64 connections at once** (`-c` changes this). Beyond that, or if `fork` fails,
+  the listener sends GOAWAY with code `0x02` BUSY and Last-ID 0, and closes, without ever
+  blocking on the client. It reaps exited children on every accept, so the count is exact.
+- Reads frames until the client closes, the framing breaks, or 30 s pass without a
+  complete request (`-t` changes this; the server then sends GOAWAY). Only requests count
+  as activity, so a peer that trickles unknown frames cannot hold a connection open.
+- Maps `/` to `/index.html` (any path ending in `/` gets `index.html`), refuses `..`, `.`,
+  a missing leading `/` and control bytes (400), hides dot-files (404), and redirects a
+  directory without a trailing slash (301). It resolves the path with `realpath`, refuses
+  anything outside ROOT (404), and then opens the resolved name one component at a time
+  from a descriptor for ROOT with `O_NOFOLLOW`, so swapping a directory for a symlink
+  in the middle of a request cannot leak a file from outside ROOT. Status codes: 200, 301,
+  400, 403, 404, 405, 500.
 - Streams files of any size as DATA frames of up to 16384 bytes.
 - Logs one line per request to stderr: peer, method, path, status, body bytes.
 
@@ -175,14 +181,17 @@ never calls the C code. It covers:
   pipelined requests; 100 KiB and exactly-32 KiB files as multiple DATA frames that
   reassemble exactly (generated at test time); request bodies read through END; path
   traversal, symlink escapes, FIFOs and dot-files refused; idle timeout with GOAWAY; empty
-  and partial frames; a random-bytes fuzz loop over 200 connections (each half-closed, and
+  and partial frames; a symlink-swap race (a directory atomically exchanged with a link
+  out of ROOT for 4 s) that must never leak a file; the connection cap (extra connections
+  get GOAWAY BUSY, and a freed slot takes a new client); unknown frames that must not keep
+  a connection alive; a random-bytes fuzz loop over 200 connections (each half-closed, and
   the server must then close it too) and 500 fuzzed REQUESTs on one connection, after which the server must still answer and its log must be
   free of sanitizer reports.
 - **bcurl:** body to stdout; exit codes 0, 1, 2, 4, 5; `-v` hexdumps that reassemble to
   exactly the frames the spec prescribes; several URLs over one connection, checked by
   counting `connect` lines in the server log; the request bytes checked by a fake server;
   unknown frames skipped (a fake server injects them before, inside and between
-  responses); no REQUEST after a GOAWAY; URL forms (`?`, `#`); and 15 kinds of
+  responses); no REQUEST after a GOAWAY; URL forms (`?`, `#`); and 16 kinds of
   misbehaving server, each of which must give exit status 2.
 
 The fuzz tests take their seed from `FUZZ_SEED` if set, and print it on failure.
