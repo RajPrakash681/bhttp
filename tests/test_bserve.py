@@ -77,6 +77,23 @@ class TestBasics(ServerCase):
             r = self.get(path)
             self.assertEqual(r.header("content-type"), ctype, path)
 
+    def test_head_errors_have_no_body(self):
+        cases = [(w.request(31, "/missing", method=w.HEAD), 404),
+                 (w.request(32, "/../secret.txt", method=w.HEAD), 400),
+                 (w.request(33, "/hello.txt", method=w.HEAD,
+                            fields=[("content-length", "x")]), 400),
+                 (w.frame(w.REQUEST, w.END, 34, b"\x02\x00\x09/x"), 400),   # path past end
+                 (w.request(35, "/sub", method=w.HEAD), 301)]
+        for data, status in cases:
+            rid = w.HEADER.unpack_from(data)[3]
+            with self.subTest(rid=rid):
+                self.sock.sendall(data)
+                r = w.read_response(self.sock, rid)
+                self.assertEqual(r.status, status)
+                self.assertEqual(len(r.frames), 1)            # RESPONSE with END, no DATA
+                self.assertTrue(r.frames[0].flags & w.END)
+        self.assert_alive()
+
     def test_head_has_headers_and_no_body(self):
         r = self.get("/index.html", rid=3, method=w.HEAD)
         self.assertEqual(r.status, 200)
@@ -294,7 +311,10 @@ class TestErrors(ServerCase):
             (w.request(5, "/hello.txt", fields=[("content-length", "0"),
                                                 ("content-length", "1")]), 400),
             (w.request(6, "/hello.txt", fields=[("content-length", "0"),
-                                                ("content-length", "000")]), 200),
+                                                ("content-length", "0")]), 200),
+            (w.request(9, "/hello.txt", fields=[("content-length", "0"),
+                                                ("content-length", "000")]), 400),
+            (w.request(10, "/hello.txt", fields=[("content-length", "00")]), 200),
             (w.request(7, "/hello.txt", flags=0, fields=[("content-length", "3")]) +
              w.frame(w.DATA, 0, 7, b"ab") + w.frame(w.DATA, w.END, 7, b"c"), 200),
             (w.request(8, "/hello.txt", flags=0, fields=[("content-length", "4")]) +

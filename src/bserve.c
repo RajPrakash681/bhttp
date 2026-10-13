@@ -569,6 +569,8 @@ static enum next on_request(struct conn *c, const struct bh_header *h, const cha
     }
     c->requests++;
     ex.id = h->id;
+    /* SPEC 6: a response to HEAD never has DATA, whatever its status, even a 400 */
+    ex.head = n >= 1 && c->req[0] == BH_HEAD;
 
     if (bh_request_parse(c->req, n, &rq, &err) != 0 ||
         check_content_length(&rq, body, &err) != 0) {
@@ -576,7 +578,6 @@ static enum next on_request(struct conn *c, const struct bh_header *h, const cha
         rc = send_text(c, &ex, 400, ex.note, NULL);
         log_bad_request(c, c->req, n, &ex);
     } else {
-        ex.head = rq.method == BH_HEAD;
         if (rq.method == BH_GET || rq.method == BH_HEAD) {
             rc = serve_path(c, &ex, rq.path, rq.path_len);
         } else {
