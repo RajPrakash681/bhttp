@@ -137,10 +137,11 @@ only a REQUEST opens a body there.) Each DATA frame carries ≤ 16384 bytes; sen
 fill all but the last. An empty DATA frame is allowed (useful only with END).
 
 `content-length` is optional. If sent, its value is 1 to 19 ASCII digits (leading zeros
-allowed), every copy of it MUST be identical, and it MUST equal the body length. The one
-exception is HEAD: every response to HEAD, whatever its status, carries the headers a GET
-would get (so `content-length` is the GET body's length), sets END on the RESPONSE and has
-no DATA. A receiver treats a violation as a malformed message.
+allowed), any further copy MUST be byte-for-byte identical (`3` and `03` are not), and it
+MUST equal the body length. The one exception is HEAD: every response to a REQUEST whose
+Method byte is HEAD, whatever its status (a 400 too), sets END on the RESPONSE and has no
+DATA; a 200 carries the headers a GET would get. A receiver treats a violation as a
+malformed message.
 
 A server MUST read a request body through its END before it treats any further frame as a
 new request; bserve reads the body first and then responds. A server that fails after
@@ -237,8 +238,9 @@ Informative: the contract of bcurl. `bcurl [-v] URL...`, where URL is
 starts with `?` gets a `/` in front; otherwise the path is sent unchanged. All URLs must
 name the same host and port and are fetched in order over one connection, never reopened.
 Exit status: 0 if every response was 2xx or 3xx, 4 if the worst was 4xx, 5 if 5xx, 2 on a
-connection or protocol error (later URLs are not fetched), 1 on a usage error; the worst
-wins, in the order 2, 5, 4, 0.
+connection or protocol error (later URLs are not fetched), 1 on a usage error, which
+includes a URL whose REQUEST would not fit in one frame (nothing is sent); the worst wins,
+in the order 2, 5, 4, 0.
 
 ## 12. Conformance checklist
 
