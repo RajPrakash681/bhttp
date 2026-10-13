@@ -3,7 +3,11 @@
 One complete bhttp/1 exchange, captured from a real run of the release build on macOS
 (Apple Silicon) on 2026-10-13, then taken apart byte by byte. The body is `www/hello.txt`
 (14 bytes), so the whole exchange is three frames: 56 bytes from the client, 120 + 22
-bytes from the server.
+bytes from the server. hello.txt was chosen because it shows every part of a response,
+the RESPONSE with its header block and a DATA frame with END, in bytes small enough to
+annotate one by one. `index.html` (542 bytes) would only make the DATA frame longer, and
+a file over 16384 bytes would add more DATA frames of the same shape. The appendix adds
+the two frame kinds this exchange does not contain: an unknown type and a GOAWAY.
 
 ```console
 $ ./bserve ./www 9000 &
@@ -34,7 +38,7 @@ stderr:
 <     content-type: text/plain; charset=utf-8   [index 4]
 <     content-length: 14   [index 5]
 <     last-modified: Thu, 08 Oct 2026 12:01:37 GMT   [index 6]
-<     date: Tue, 13 Oct 2026 05:52:22 GMT   [index 7]
+<     date: Tue, 13 Oct 2026 06:11:19 GMT   [index 7]
 <     server: bserve/1.0   [index 8]
 <   0000  00 70 02 00 00 00 00 01  00 c8 04 00 19 74 65 78  |.p...........tex|
 <   0010  74 2f 70 6c 61 69 6e 3b  20 63 68 61 72 73 65 74  |t/plain; charset|
@@ -42,7 +46,7 @@ stderr:
 <   0030  75 2c 20 30 38 20 4f 63  74 20 32 30 32 36 20 31  |u, 08 Oct 2026 1|
 <   0040  32 3a 30 31 3a 33 37 20  47 4d 54 07 00 1d 54 75  |2:01:37 GMT...Tu|
 <   0050  65 2c 20 31 33 20 4f 63  74 20 32 30 32 36 20 30  |e, 13 Oct 2026 0|
-<   0060  35 3a 35 32 3a 32 32 20  47 4d 54 08 00 0a 62 73  |5:52:22 GMT...bs|
+<   0060  36 3a 31 31 3a 31 39 20  47 4d 54 08 00 0a 62 73  |6:11:19 GMT...bs|
 <   0070  65 72 76 65 2f 31 2e 30                           |erve/1.0|
 < DATA id=1 length=14 flags=0x01 (END): 14 body bytes
 <   0000  00 0e 03 01 00 00 00 01  48 65 6c 6c 6f 2c 20 62  |........Hello, b|
@@ -60,10 +64,10 @@ exit=0
 The server's log for the same run (stderr of `bserve`):
 
 ```text
-2026-10-13T05:52:22Z bserve: listening on 0.0.0.0:9000, root /Users/rajprakash/devops-work/bhttp/www, idle timeout 30s, max 64 connections
-2026-10-13T05:52:22Z 127.0.0.1:64748 connect
-2026-10-13T05:52:22Z 127.0.0.1:64748 GET /hello.txt 200 14
-2026-10-13T05:52:22Z 127.0.0.1:64748 close (peer closed, 1 request)
+2026-10-13T06:11:18Z bserve: listening on 0.0.0.0:9000, root ./www, idle timeout 30s, max 64 connections
+2026-10-13T06:11:19Z 127.0.0.1:61486 connect
+2026-10-13T06:11:19Z 127.0.0.1:61486 GET /hello.txt 200 14
+2026-10-13T06:11:19Z 127.0.0.1:61486 close (peer closed, 1 request)
 ```
 
 ## Frame 1: REQUEST, client to server (56 bytes)
@@ -131,10 +135,10 @@ off   bytes                    field         meaning
       37 20 47 4d 54
 004b  07                       Index         7 = date
 004c  00 1d                    VLen          29
-004e  54 75 65 2c 20 31 33 20  Value         "Tue, 13 Oct 2026 05:52:22 GMT"
+004e  54 75 65 2c 20 31 33 20  Value         "Tue, 13 Oct 2026 06:11:19 GMT"
       4f 63 74 20 32 30 32 36
-      20 30 35 3a 35 32 3a 32
-      32 20 47 4d 54
+      20 30 36 3a 31 31 3a 31
+      39 20 47 4d 54
 006b  08                       Index         8 = server
 006c  00 0a                    VLen          10
 006e  62 73 65 72 76 65 2f 31  Value         "bserve/1.0"
@@ -178,3 +182,75 @@ the indexed names and the length prefixes, which replace `Name: ` and `\r\n` del
 After frame 3 the connection stays open: bcurl had only one URL, so it closed the
 connection itself, and bserve logged `peer closed, 1 request`. With more URLs, bcurl
 would have sent the next REQUEST, with Request ID 2, on the same connection.
+
+## Appendix: an unknown frame and a GOAWAY
+
+`tools/wire_demo.py` drives the real server with raw frames built by the spec-only Python
+codec (`tests/bhttp_wire.py`) and dumps them in bcurl's `-v` format. It sends a frame of
+the unknown type `0x42` followed by `GET /hello.txt`, then waits. The server runs with a
+1-second idle timeout, so the GOAWAY comes quickly:
+
+```console
+$ ./bserve -t 1 ./www 9000 &
+$ python3 tools/wire_demo.py localhost 9000
+```
+
+```text
+> type 0x42 id=0 length=8 flags=0x00
+>   0000  00 08 42 00 00 00 00 00  76 32 20 68 65 6c 6c 6f  |..B.....v2 hello|
+> REQUEST id=1 length=30 flags=0x01 (END)
+>   0000  00 1e 01 01 00 00 00 01  01 00 0a 2f 68 65 6c 6c  |.........../hell|
+>   0010  6f 2e 74 78 74 01 00 0e  6c 6f 63 61 6c 68 6f 73  |o.txt...localhos|
+>   0020  74 3a 39 30 30 30                                 |t:9000|
+< RESPONSE id=1 length=112 flags=0x00
+<   0000  00 70 02 00 00 00 00 01  00 c8 04 00 19 74 65 78  |.p...........tex|
+<   0010  74 2f 70 6c 61 69 6e 3b  20 63 68 61 72 73 65 74  |t/plain; charset|
+<   0020  3d 75 74 66 2d 38 05 00  02 31 34 06 00 1d 54 68  |=utf-8...14...Th|
+<   0030  75 2c 20 30 38 20 4f 63  74 20 32 30 32 36 20 31  |u, 08 Oct 2026 1|
+<   0040  32 3a 30 31 3a 33 37 20  47 4d 54 07 00 1d 54 75  |2:01:37 GMT...Tu|
+<   0050  65 2c 20 31 33 20 4f 63  74 20 32 30 32 36 20 30  |e, 13 Oct 2026 0|
+<   0060  36 3a 31 31 3a 31 39 20  47 4d 54 08 00 0a 62 73  |6:11:19 GMT...bs|
+<   0070  65 72 76 65 2f 31 2e 30                           |erve/1.0|
+< DATA id=1 length=14 flags=0x01 (END)
+<   0000  00 0e 03 01 00 00 00 01  48 65 6c 6c 6f 2c 20 62  |........Hello, b|
+<   0010  68 74 74 70 21 0a                                 |http!.|
+< GOAWAY id=0 length=5 flags=0x00
+<   0000  00 05 04 00 00 00 00 00  00 00 00 01 00           |.............|
+* server closed the connection after 1.0 s
+```
+
+The server's log for that run:
+
+```text
+2026-10-13T06:11:19Z bserve: listening on 0.0.0.0:9000, root ./www, idle timeout 1s, max 64 connections
+2026-10-13T06:11:19Z 127.0.0.1:61488 connect
+2026-10-13T06:11:19Z 127.0.0.1:61488 GET /hello.txt 200 14
+2026-10-13T06:11:20Z 127.0.0.1:61488 close (idle timeout, 1 request)
+```
+
+The REQUEST, RESPONSE and DATA frames have the same layout as frames 1 to 3 above; this
+REQUEST carries only a `host` header, so its payload is 30 bytes. The two new frames:
+
+```text
+off   bytes                    field         meaning
+----  -----------------------  ------------  ---------------------------------------------
+                                             -- unknown frame, client to server (16 bytes) --
+0000  00 08                    Length        8 payload bytes follow the header
+0002  42                       Type          0x42: not a v1 type, so the server skips
+                                             exactly 8 bytes and carries on (SPEC 4)
+0003  00                       Flags         0x00
+0004  00 00 00 00              Request ID    0
+0008  76 32 20 68 65 6c 6c 6f  Payload       "v2 hello": opaque to a v1 receiver
+
+                                             -- GOAWAY, server to client (13 bytes) --
+0000  00 05                    Length        5 payload bytes
+0002  04                       Type          0x04 GOAWAY
+0003  00                       Flags         0x00
+0004  00 00 00 00              Request ID    0: GOAWAY is about the connection
+0008  00 00 00 01              Last-ID       1: the last request answered completely
+000c  00                       Code          0x00 NO_ERROR: the idle timeout passed
+```
+
+The server sent nothing in reply to the unknown frame: the first frame back is the RESPONSE
+to request 1. One second after that response, with no further REQUEST, it sent GOAWAY,
+shut down its side, and closed, which its log records as `idle timeout, 1 request`.
